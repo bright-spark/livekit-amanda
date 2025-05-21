@@ -2,19 +2,23 @@
 
 A voice assistant application built using the LiveKit Agents framework, capable of using Multimodal Control Protocol (MCP) tools to interact with external services.
 
+## Medium Article
+
+- [Integrating Zapier MCP with your AI Assistant](https://xthemadgenius.medium.com/integrating-zapier-mcp-with-your-ai-assistant-38e081e3a5b7)
+
 ## Features
 
 - Voice-based interaction with a helpful AI assistant
 - Integration with MCP tools from external servers
-- Speech-to-text using Deepgram
-- Natural language processing using OpenAI's GPT-4o
-- Text-to-speech using OpenAI
+- Speech-to-text using Azure
+- Natural language processing using Azure OpenAI
+- Text-to-speech using Azure
 - Voice activity detection using Silero
 
 ## Prerequisites
 
 - Python 3.9+
-- API keys for OpenAI and Deepgram
+- API keys for Azure OpenAI and Azure Speech
 - MCP server endpoint
 
 ## Installation
@@ -32,9 +36,15 @@ A voice assistant application built using the LiveKit Agents framework, capable 
 
 3. Create a `.env` file with your API keys and configuration:
    ```
-   OPENAI_API_KEY=your_openai_api_key
-   DEEPGRAM_API_KEY=your_deepgram_api_key
    ZAPIER_MCP_URL=your_mcp_server_url
+   AZURE_OPENAI_VERSION=your_azure_openai_version
+   AZURE_OPENAI_DEPLOYMENT=your_azure_openai_deployment
+   AZURE_OPENAI_ENDPOINT=your_azure_openai_endpoint
+   AZURE_OPENAI_API_KEY=your_azure_openai_api_key
+   AZURE_STT_REGION=your_azure_stt_region
+   AZURE_STT_API_KEY=your_azure_stt_api_key
+   AZURE_TTS_REGION=your_azure_tts_region
+   AZURE_TTS_API_KEY=your_azure_tts_api_key
    ```
 
 ## Usage
@@ -58,6 +68,5 @@ The agent will connect to the specified LiveKit room and start listening for voi
 ## Acknowledgements
 
 - [LiveKit](https://livekit.io/) for the underlying real-time communication infrastructure
-- [OpenAI](https://openai.com/) for GPT-4o and text-to-speech
-- [Deepgram](https://deepgram.com/) for speech-to-text
+- [Azure](https://azure.microsoft.com/) for openai, speech-to-text and text-to-speech
 - [Silero](https://github.com/snakers4/silero-vad) for Voice Activity Detection
