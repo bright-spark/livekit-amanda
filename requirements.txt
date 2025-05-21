@@ -10,10 +10,10 @@ pytz
 httpx
 requests
 wikipedia-api
+googlesearch-python
 geopy
 brotli
 beautifulsoup4
-bingsearchpy
 html5lib
 lxml
 redis>=4.5.0

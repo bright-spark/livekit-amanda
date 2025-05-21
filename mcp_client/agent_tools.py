@@ -1,16 +1,29 @@
+# Standard library imports
 import asyncio
-import logging
-import json
 import inspect
-import typing
-from typing import Any, List, Dict, Callable, Optional, Awaitable, Sequence, Tuple, Type, Union, cast
+import json
+import logging
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
 from uuid import uuid4
 
-# Import from the MCP module
-from .util import MCPUtil, FunctionTool
+# Third-party imports
+from livekit.agents import AgentSession, ChatContext, FunctionTool as Tool, JobContext
+
+# Local application imports
 from .server import MCPServer, MCPServerSse
-from livekit.agents import ChatContext, AgentSession, JobContext, FunctionTool as Tool
-from mcp import CallToolRequest
+from .util import FunctionTool, MCPUtil
 
 logger = logging.getLogger("mcp-agent-tools")
 

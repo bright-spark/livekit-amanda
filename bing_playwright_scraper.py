@@ -1,9 +1,9 @@
-import asyncio
+# Standard library imports
+import re
+
+# Third-party imports
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-
-
-import re
 
 async def scrape_bing(query, num_results=10):
     # --- AI logic for Bing parameters ---

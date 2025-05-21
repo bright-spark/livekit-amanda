@@ -1,10 +1,13 @@
+# Standard library imports
 import asyncio
-import json
 import functools
+import json
 from typing import Any, Dict, List
 
-# Import from mcp libraries
-from mcp.types import Tool as MCPTool, CallToolResult
+# MCP package imports
+from mcp.types import CallToolResult, Tool as MCPTool
+
+# Local application imports
 from .server import MCPServer
 
 # A minimal FunctionTool class used by the agent.

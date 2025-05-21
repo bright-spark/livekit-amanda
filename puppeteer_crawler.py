@@ -1,6 +1,9 @@
+# Standard library imports
 import asyncio
-from playwright.async_api import async_playwright
+
+# Third-party imports
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 async def crawl_page(url, wait_selector=None, timeout=30000, user_agent=None, extra_headers=None, extract_text=True):
     """

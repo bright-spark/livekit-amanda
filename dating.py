@@ -1,16 +1,34 @@
-from dotenv import load_dotenv
-load_dotenv()  # Load environment variables from .env file
-import os
+# Standard library imports
 import asyncio
 import json
+import os
 import time
-import httpx
 from datetime import datetime, timedelta
+from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+
+# Third-party imports
+import httpx
 import pytz
+from dotenv import load_dotenv
+from googlesearch import search as google_search
+
+# LiveKit imports
 from livekit import agents
-from livekit.agents import JobContext, WorkerOptions, cli, JobProcess, Agent, AgentSession, function_tool, RunContext
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext,
+    JobProcess,
+    RunContext,
+    WorkerOptions,
+    cli,
+    function_tool,
+)
 from livekit.agents.llm import ChatContext, ChatMessage
-from livekit.plugins import silero, openai, azure
+from livekit.plugins import azure, openai, silero
+
+# Load environment variables
+load_dotenv()  # Load environment variables from .env file
 
 # --- SYSTEM PROMPT: Tool Overview and Agent Instructions ---
 SYSTEM_PROMPT = '''
@@ -29,16 +47,13 @@ Instructions:
 - Each tool is described with a clear, action-oriented docstring for optimal auto-selection.
 '''
 
-# Import necessary libraries
+# Third-party imports (continued)
 import requests
-import random
 import wikipediaapi
-import html
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
-from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, TypedDict, Union, Literal
 from bs4 import BeautifulSoup
+from dataclasses import dataclass
+from geopy.exc import GeocoderTimedOut
+from geopy.geocoders import Nominatim
 from urllib.parse import urljoin
 from typing import TypedDict, List
 from .agent_utils import chunk_text, speak_chunks, construct_locanto_query_tool

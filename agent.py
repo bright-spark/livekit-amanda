@@ -1,37 +1,51 @@
-import os
-import logging
+# Standard library imports
 import asyncio
 import json
+import logging
+import os
+import re
+import threading
 import time
-import httpx
-import pytz
-import random
-import wikipediaapi
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
+import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union
+from urllib.parse import quote_plus, urljoin
+
+# Third-party imports
+import brotli
+import httpx
+import pytz
+import redis as redis_pkg
+import uvicorn
+import wikipediaapi
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from livekit.agents import JobContext, WorkerOptions, cli, JobProcess, Agent, AgentSession, function_tool, RunContext
-from livekit.agents.llm import ChatContext, ChatMessage, ChatChunk, function_tool
+from fastapi import FastAPI, HTTPException
+from geopy.exc import GeocoderTimedOut
+from geopy.geocoders import Nominatim
+from lxml_html_clean import Cleaner
+from playwright.async_api import async_playwright
+from pydantic import BaseModel
+from googlesearch import search as google_search
+
+# LiveKit imports
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext,
+    JobProcess,
+    RunContext,
+    WorkerOptions,
+    cli,
+    function_tool,
+)
+from livekit.agents.llm import ChatChunk, ChatContext, ChatMessage
 from livekit.plugins import azure, openai, silero
+
+# Local application imports
 from mcp_client import MCPServerSse
 from mcp_client.agent_tools import MCPToolsIntegration
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, quote_plus
-from typing import List, Dict, Any, Optional, Union, Literal, TypedDict, Tuple
-import re
-import webbrowser
-import threading
-import urllib.parse
-from fastapi import FastAPI, HTTPException
-import uvicorn
-from pydantic import BaseModel
-import redis as redis_pkg
-from playwright.async_api import async_playwright
-import brotli
-from lxml_html_clean import Cleaner
-import html5lib
 
 load_dotenv()
 
@@ -41,33 +55,57 @@ class FunctionAgent(Agent):
     def __init__(self):
         super().__init__(
             instructions="""
-                You are Amanda, an advanced AI assistant with access to a wide range of tools and capabilities.
+                You are Amanda, an advanced AI assistant with access to a comprehensive set of tools and capabilities.
                 Your primary goal is to be helpful, informative, and efficient in your responses.
                 
-                CAPABILITIES:
-                - Web Search: Find information from across the internet
-                - Web Scraping: Extract and analyze content from web pages
-                - Locanto Integration: Search and browse Locanto listings
-                - Wikipedia Lookup: Get detailed information on various topics
-                - Weather Information: Get current weather conditions
-                - Time and Date: Provide accurate time and date information
-                - Mathematical Calculations: Perform complex calculations
-                - News: Fetch the latest headlines on any topic
-                - Browser Automation: Interact with websites as needed
-                - Data Processing: Clean and process text/data
+                ===== AVAILABLE TOOLS =====
                 
-                GUIDELINES:
-                1. Always verify information when possible
-                2. Be concise but thorough in responses
-                3. Use the most appropriate tool for each request
-                4. Handle sensitive information with care
-                5. Provide sources when available
-                6. Ask for clarification if a request is unclear
-                7. Respect user privacy and data protection
+                [SEARCH & BROWSING]
+                - web_search(query): Search the web for information
+                - bing_web_search(query): Alternative search using Bing
+                - wiki_lookup(topic): Get detailed information from Wikipedia
+                - web_crawl(url, selector, max_pages): Extract content from web pages
+                - open_website(url): Open a specific website
+                - open_known_website(site_name, query): Open a well-known website (e.g., 'google', 'wikipedia')
                 
-                When using web search or scraping tools, be mindful of the website's terms of service.
-                Always present information in a clear, organized manner.
-            """,
+                [LOCANTO INTEGRATION]
+                - search_locanto(category_path, location, max_pages): Search Locanto listings
+                - search_locanto_browser(query, location, max_pages, tag, category, section, url): Advanced Locanto search
+                - locanto_matchmaking(query, gender, seeking, age, location, tag, category, section, max_pages): Find matches on Locanto
+                - show_top_locanto_categories_and_tags(location): Browse Locanto categories
+                
+                [UTILITIES]
+                - get_weather(location): Get current weather conditions
+                - get_news_headlines(topic, country): Fetch latest news
+                - calculate(expression): Evaluate mathematical expressions
+                - get_current_datetime(): Get current date and time
+                - get_fun_content(content_type): Get jokes, facts, or trivia
+                - indeed_job_search(query, location): Search for jobs on Indeed
+                
+                [ADVANCED]
+                - extract_links(url, filter_pattern): Extract links from a webpage
+                - clean_html(html_content): Sanitize HTML content
+                - take_screenshot(url, selector): Capture webpage screenshots
+                
+                ===== GUIDELINES =====
+                1. TOOL SELECTION: Choose the most appropriate tool for each task
+                2. EFFICIENCY: Use the most direct tool that can answer the query
+                3. VERIFICATION: Cross-reference information when possible
+                4. PRIVACY: Never share sensitive personal information
+                5. ATTRIBUTION: Cite sources when using external information
+                6. CLARITY: Ask for clarification if a request is unclear
+                7. CONTEXT: Maintain context from previous interactions
+                8. LIMITATIONS: Be clear about the limitations of your knowledge
+                
+                ===== BEST PRACTICES =====
+                - For general knowledge: Use wiki_lookup() first
+                - For current information: Use web_search() or get_news_headlines()
+                - For calculations: Use calculate()
+                - For Locanto-related queries: Use the appropriate Locanto tools
+                - For website interaction: Use open_website() or web_crawl()
+                
+                Always present information in a clear, organized, and helpful manner.
+                """,
             stt=azure.STT(
                 speech_key=os.environ["AZURE_STT_API_KEY"],
                 speech_region=os.environ["AZURE_STT_REGION"]
@@ -77,7 +115,7 @@ class FunctionAgent(Agent):
                 azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
                 azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
                 api_version=os.environ["AZURE_OPENAI_VERSION"],
-                temperature=0.7,
+                temperature=0.3,  # Lower temperature for more focused and consistent responses
             ),
             tts=azure.TTS(
                 speech_key=os.environ["AZURE_TTS_API_KEY"],
@@ -110,7 +148,494 @@ class FunctionAgent(Agent):
 
             yield chunk
             
-    # --- Web Tools ---
+# --- END: FunctionAgent ---
+
+# --- BEGIN: TOOLS ---
+# Import tools and utilities from tools.py
+from .tools import (
+    # Tool functions
+    search_locanto,
+    search_locanto_browser,
+    locanto_matchmaking,
+    web_crawl,
+    web_search,
+    get_current_datetime,
+    wiki_lookup,
+    get_news_headlines,
+    get_weather,
+    calculate,
+    get_fun_content,
+    show_top_locanto_categories_and_tags,
+    open_website,
+    indeed_job_search,
+    open_known_website,
+    bing_web_search,
+    
+    # Utility functions
+    handle_tool_results,
+    sanitize_for_azure,
+    clean_spoken,
+    get_current_date_and_timezone,
+    is_sequence_but_not_str,
+    
+    # Data models
+    LocantoCategory,
+    LocantoListing,
+    
+    # Validation functions
+    is_valid_locanto_location,
+    is_valid_locanto_category,
+    is_valid_locanto_section,
+    is_valid_locanto_tag,
+    suggest_closest_slug,
+    
+    # Constants and configurations
+    WELL_KNOWN_WEBSITES,
+    
+    # Main class
+    AIVoiceAssistant
+)
+
+# --- TOOL DEFINITIONS (single-source, top-level) ---
+# All tools are now imported from tools.py
+
+# Fallback URL for error cases
+FALLBACK_URL = "https://fallback"
+
+# Locanto configuration
+LOCANTO_LOCATION_SLUGS = ["western-cape", "gauteng", "kwazulu-natal", "eastern-cape",
+                         "free-state", "limpopo", "mpumalanga", "north-west", "northern-cape"]
+LOCANTO_CATEGORY_SLUGS = ["personals", "men-seeking-men", "women-seeking-men", "men-seeking-women", "women-seeking-women"]
+LOCANTO_SECTION_IDS = ["dating", "casual-encounters", "missed-connections", "friends"]
+LOCANTO_TAG_SLUGS = ["gay", "lesbian", "bisexual", "transgender", "queer", "lgbtq+", "straight"]
+
+# --- END: TOOLS ---
+
+# --- BEGIN: entrypoint ---
+
+class AIVoiceAssistant:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(AIVoiceAssistant, cls).__new__(cls)
+            cls._instance.vad = None
+            cls._instance.session = None
+            cls._instance.agent = None
+            # Initialize Wikipedia API
+            cls._instance.wiki_wiki = wikipediaapi.Wikipedia(
+                language='en',
+                extract_format=wikipediaapi.ExtractFormat.WIKI,
+                user_agent='AIVoiceAssistant/1.0'
+            )
+            # Initialize geocoder with a user agent for weather and location services
+            cls._instance.geolocator = Nominatim(user_agent="AIVoiceAssistant/1.0")
+            # Cache dictionaries
+            cls._instance.weather_cache = {}  # Cache weather data
+            cls._instance.wiki_cache = {}     # Cache wikipedia lookups
+            cls._instance.news_cache = {}     # Cache news lookups
+            cls._instance.crawl_cache = {}    # Cache web crawl results
+            print("All search and lookup clients initialized")
+        return cls._instance
+
+    def initialize_vad(self, proc: JobProcess):
+        """Initialize Voice Activity Detection with all relevant parameters from env vars"""
+        if self.vad is None:
+            import os
+            threshold = float(os.environ.get("VAD_THRESHOLD", 0.5))
+            min_speech = float(os.environ.get("VAD_MIN_SPEECH", 0.1))
+            min_silence = float(os.environ.get("VAD_MIN_SILENCE", 0.5))
+            debug = os.environ.get("VAD_DEBUG", "false").lower() in ("1", "true", "yes", "on")
+            try:
+                proc.userdata["vad"] = silero.VAD.load(
+                    threshold=threshold,
+                    min_speech_duration=min_speech,
+                    min_silence_duration=min_silence,
+                    debug=debug
+                )
+                print(f"[VAD] Loaded with threshold={threshold}, min_speech={min_speech}, min_silence={min_silence}, debug={debug}")
+            except TypeError:
+                # Fallback if silero.VAD.load does not accept these params
+                proc.userdata["vad"] = silero.VAD.load()
+                print(f"[VAD] Loaded with default params (full config not supported)")
+            self.vad = proc.userdata["vad"]
+
+    def setup_session(self, vad):
+        """Setup agent session with all required components"""
+        if self.session is None:
+            self.session = AgentSession(
+                vad=vad,
+                stt=azure.STT(
+                    speech_key=os.environ["AZURE_STT_API_KEY"],
+                    speech_region=os.environ["AZURE_STT_REGION"]
+                ),
+                llm=openai.LLM.with_azure(
+                    api_key=os.environ["AZURE_OPENAI_API_KEY"],
+                    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+                    azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
+                    api_version=os.environ["AZURE_OPENAI_VERSION"],
+                    temperature=1,
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    timeout=httpx.Timeout(connect=15.0, read=10.0, write=5.0, pool=5.0),
+                    user="martin",
+                    organization=os.environ.get("redbuilder"),
+                    project=os.environ.get("kiki"),
+                ),
+                tts=azure.TTS(
+                    speech_key=os.environ["AZURE_TTS_API_KEY"],
+                    speech_region=os.environ["AZURE_TTS_REGION"]
+                )
+            )
+        return self.session
+
+    def __init__(self):
+        """Initialize the AIVoiceAssistant with necessary components"""
+        if not hasattr(self, '_instance'):
+            self._instance = None
+            self.vad = None
+            self.session = None
+            self.agent = None
+            # Initialize Wikipedia API
+            self.wiki_wiki = wikipediaapi.Wikipedia(
+                language='en',
+                extract_format=wikipediaapi.ExtractFormat.WIKI,
+                user_agent='AIVoiceAssistant/1.0'
+            )
+            # Initialize geocoder
+            self.geolocator = Nominatim(user_agent="AIVoiceAssistant/1.0")
+            # Cache dictionaries
+            self.weather_cache = {}
+            self.wiki_cache = {}
+            self.news_cache = {}
+            self.crawl_cache = {}
+            # Store cookies between requests
+            self.cookies = {}
+            # Default headers for HTTP requests
+            self.default_headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'DNT': '1'
+            }
+            print("All search and lookup clients initialized")
+
+    def _update_headers(self, url: str) -> Dict[str, str]:
+        """Update headers for each request to maintain session-like behavior"""
+        headers = self.client.headers.copy()
+        headers.update({
+            'Referer': url,
+            'Cookie': '; '.join([f'{k}={v}' for k, v in self.cookies.items()])
+        })
+        return headers
+
+    async def _update_cookies(self, response: httpx.Response) -> None:
+        """Update stored cookies from response"""
+        if 'set-cookie' in response.headers:
+            for cookie in response.headers.getlist('set-cookie'):
+                if '=' in cookie:
+                    name, value = cookie.split('=', 1)
+                    value = value.split(';')[0]
+                    self.cookies[name] = value
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get an HTTP client for making requests"""
+        return httpx.AsyncClient(
+            timeout=30.0,
+            follow_redirects=True,
+            headers=self.default_headers
+        )
+
+    async def get_categories(self, base_url: str) -> List[LocantoCategory]:
+        """Get available categories from a Locanto page.
+
+        Args:
+            base_url: The URL to get categories from
+
+        Returns:
+            List of LocantoCategory objects
+        """
+        categories: List[LocantoCategory] = []
+        async with await self._get_client() as client:
+            try:
+                response = await client.get(base_url, headers=self._update_headers(base_url))
+                await self._update_cookies(response)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+                # Find category links in the sidebar navigation
+                category_elements = soup.select('nav.sidebar a[href*="/c/"]')
+                for elem in category_elements:
+                    name = elem.get_text(strip=True)
+                    url = urljoin(base_url, elem['href'])
+                    count_elem = elem.find('span', class_='count')
+                    count = int(count_elem.get_text(strip=True)) if count_elem else 0
+                    
+                    categories.append({
+                        'name': name,
+                        'url': url,
+                        'count': count
+                    })
+
+            except Exception as e:
+                print(f"Error getting categories: {str(e)}")
+
+        return categories
+
+    async def get_listing_details(self, url: str) -> Dict[str, Any]:
+        """Get detailed information from a single listing page.
+
+        Args:
+            url: The URL of the listing to scrape
+
+        Returns:
+            Dictionary containing detailed listing information
+        """
+        details = {
+            'contact_info': None,
+            'poster_info': None,
+            'full_description': None
+        }
+
+        async with await self._get_client() as client:
+            try:
+                response = await client.get(url, headers=self._update_headers(url))
+                await self._update_cookies(response)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+                # Extract full description from the ad details
+                desc_elem = soup.select_one('div.ad-content__description')
+                
+                # Get age if available
+                age_elem = soup.select_one('span.age')
+                if age_elem:
+                    details['age'] = age_elem.get_text(strip=True)
+                
+                # Get reply count
+                reply_elem = soup.select_one('span.reply-count')
+                if reply_elem:
+                    try:
+                        details['reply_count'] = int(reply_elem.get_text(strip=True))
+                    except ValueError:
+                        details['reply_count'] = 0
+                
+                # Get ad ID
+                ad_id_elem = soup.select_one('span.ad-id')
+                if ad_id_elem:
+                    details['ad_id'] = ad_id_elem.get_text(strip=True)
+                
+                # Extract full description
+                if desc_elem:
+                    details['full_description'] = desc_elem.get_text(strip=True)
+
+                # Extract contact information from the contact section
+                contact_elem = soup.select_one('div.contact-box')
+                if contact_elem:
+                    details['contact_info'] = contact_elem.get_text(strip=True)
+
+                # Extract poster information from the user section
+                poster_elem = soup.select_one('div.user-info')
+                if poster_elem:
+                    details['poster_info'] = poster_elem.get_text(strip=True)
+
+            except Exception as e:
+                print(f"Error getting listing details: {str(e)}")
+
+        return details
+
+    async def locanto_search(self, category_path: List[str] = ['personals', 'men-seeking-men'], location: str = 'western-cape', max_pages: int = 3) -> List[LocantoListing]:
+        """Search Locanto.co.za for listings in a specific category and location.
+        
+        Args:
+            category: The category to search in (default: 'personals')
+            location: The location to search in (default: 'western-cape')
+            max_pages: Maximum number of pages to scrape (default: 3)
+            
+        Returns:
+            List of LocantoListing objects containing the scraped data
+        """
+        # Construct the URL based on category path
+        category_url = '/'.join(category_path)
+        base_url = f'https://locanto.co.za/{location}/{category_url}/'
+        listings: List[LocantoListing] = []
+        
+        for page in range(1, max_pages + 1):
+            url = f'{base_url}?page={page}' if page > 1 else base_url
+            try:
+                response = await self.client.get(url, headers=self._update_headers(url))
+                await self._update_cookies(response)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'html.parser')
+                # Find all listing containers
+                listing_containers = soup.select('div.resultlist__listing')
+                
+                for container in listing_containers:
+                    try:
+                        # Extract listing details
+                        title_elem = container.select_one('h3.resultlist__title a')
+                        title = title_elem.get_text(strip=True) if title_elem else ''
+                        url = urljoin(base_url, title_elem['href']) if title_elem else ''
+                        
+                        description = ''
+                        desc_elem = container.select_one('div.resultlist__description')
+                        if desc_elem:
+                            description = desc_elem.get_text(strip=True)
+                        
+                        location = ''
+                        loc_elem = container.select_one('div.resultlist__location')
+                        if loc_elem:
+                            location = loc_elem.get_text(strip=True)
+                        
+                        price = ''
+                        price_elem = container.select_one('span.resultlist__price')
+                        if price_elem:
+                            price = price_elem.get_text(strip=True)
+                        
+                        date_posted = ''
+                        date_elem = container.select_one('time.resultlist__date')
+                        if date_elem:
+                            date_posted = date_elem.get_text(strip=True)
+                        
+                        images = []
+                        img_elems = container.select('img.resultlist__image')
+                        for img in img_elems:
+                            if 'src' in img.attrs:
+                                img_url = urljoin(base_url, img['src'])
+                                images.append(img_url)
+                        
+                        # Get detailed information for this listing
+                        details = await self.get_listing_details(url)
+
+                        listing: LocantoListing = {
+                            'title': title,
+                            'description': description,
+                            'location': location,
+                            'price': price,
+                            'date_posted': date_posted,
+                            'url': url,
+                            'images': images,
+                            'contact_info': details['contact_info'],
+                            'poster_info': details['poster_info'],
+                            'full_description': details['full_description'],
+                            'category_path': category_path,
+                            'age': details.get('age'),
+                            'reply_count': details.get('reply_count'),
+                            'ad_id': details.get('ad_id')
+                        }
+                        
+                        listings.append(listing)
+                        
+                    except Exception as e:
+                        print(f"Error processing listing: {str(e)}")
+                        continue
+                
+            except Exception as e:
+                print(f"Error fetching page {page}: {str(e)}")
+                break
+            
+            # Small delay between pages to be respectful
+            await asyncio.sleep(1)
+        
+        return listings
+
+
+    async def locanto_search_by_category(self, category_path: List[str] = ['personals', 'men-seeking-men'], location: str = 'western-cape', max_pages: int = 3) -> List[LocantoListing]:
+        """Search Locanto.co.za for listings in a specific category and location.
+        
+        Args:
+            category: The category to search in (default: 'personals')
+            location: The location to search in (default: 'western-cape')
+            max_pages: Maximum number of pages to scrape (default: 3)
+            
+        Returns:
+            List of LocantoListing objects containing the scraped data
+        """
+        # Construct the URL based on category path
+        category_url = '/'.join(category_path)
+        base_url = f'https://locanto.co.za/{location}/{category_url}/'
+        listings: List[LocantoListing] = []
+        
+        for page in range(1, max_pages + 1):
+            url = f'{base_url}?page={page}' if page > 1 else base_url
+            try:
+                response = await self.client.get(url, headers=self._update_headers(url))
+                await self._update_cookies(response)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'html.parser')
+                # Find all listing containers
+                listing_containers = soup.select('div.resultlist__listing')
+                
+                for container in listing_containers:
+                    try:
+                        # Extract listing details
+                        title_elem = container.select_one('h3.resultlist__title a')
+                        title = title_elem.get_text(strip=True) if title_elem else ''
+                        url = urljoin(base_url, title_elem['href']) if title_elem else ''
+                        
+                        description = ''
+                        desc_elem = container.select_one('div.resultlist__description')
+                        if desc_elem:
+                            description = desc_elem.get_text(strip=True)
+                        
+                        location = ''
+                        loc_elem = container.select_one('div.resultlist__location')
+                        if loc_elem:
+                            location = loc_elem.get_text(strip=True)
+                        
+                        price = ''
+                        price_elem = container.select_one('span.resultlist__price')
+                        if price_elem:
+                            price = price_elem.get_text(strip=True)
+                        
+                        date_posted = ''
+                        date_elem = container.select_one('time.resultlist__date')
+                        if date_elem:
+                            date_posted = date_elem.get_text(strip=True)
+                        
+                        images = []
+                        img_elems = container.select('img.resultlist__image')
+                        for img in img_elems:
+                            if 'src' in img.attrs:
+                                img_url = urljoin(base_url, img['src'])
+                                images.append(img_url)
+                        
+                        # Get detailed information for this listing
+                        details = await self.get_listing_details(url)
+
+                        listing: LocantoListing = {
+                            'title': title,
+                            'description': description,
+                            'location': location,
+                            'price': price,
+                            'date_posted': date_posted,
+                            'url': url,
+                            'images': images,
+                            'contact_info': details['contact_info'],
+                            'poster_info': details['poster_info'],
+                            'full_description': details['full_description'],
+                            'category_path': category_path,
+                            'age': details.get('age'),
+                            'reply_count': details.get('reply_count'),
+                            'ad_id': details.get('ad_id')
+                        }
+                        
+                        listings.append(listing)
+                        
+                    except Exception as e:
+                        print(f"Error processing listing: {str(e)}")
+                        continue
+                
+            except Exception as e:
+                print(f"Error fetching page {page}: {str(e)}")
+                break
+            
+            # Small delay between pages to be respectful
+            await asyncio.sleep(1)
+        
+        return listings
+
+        # --- Web Tools ---
     
     @function_tool
     async def web_search(self, context: RunContext, query: str, num_results: int = 5) -> str:
@@ -686,6 +1211,11 @@ class FunctionAgent(Agent):
         except Exception as e:
             logging.error(f"News lookup error: {e}")
             return "I encountered an error while getting the news."
+
+
+# --- END: TOOLS ---    
+
+# --- BEGIN: entrypoint ---
 
 async def entrypoint(ctx: JobContext):
     """Main entrypoint for the LiveKit agent application."""

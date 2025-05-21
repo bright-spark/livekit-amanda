@@ -1,14 +1,17 @@
+# Standard library imports
 import asyncio
+import logging
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from typing import Any, Dict, List, Optional, Tuple
-import logging
 
-# Import from the installed mcp package
+# Third-party imports
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+
+# MCP package imports
 import mcp.types
+from mcp.client import session as mcp_session
+from mcp.client import sse as mcp_sse
 from mcp.types import CallToolResult, JSONRPCMessage, Tool as MCPTool
-from mcp.client.sse import sse_client
-from mcp.client.session import ClientSession
 
 # Base class for MCP servers
 class MCPServer:
