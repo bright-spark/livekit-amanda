@@ -1,214 +1,55 @@
-from .puppeteer_crawler import crawl_page
-from livekit.agents import function_tool
-from livekit.agents import RunContext
-import httpx
-import logging
-import random
+# Standard library imports
+import asyncio
 import html
-from urllib.parse import urljoin
-from bs4 import BeautifulSoup
-from datetime import datetime
-import pytz
+import logging
 import os
-from .utils import sanitize_for_azure
+import random
+import re
+import time
+from datetime import datetime
+from urllib.parse import urljoin
+
+# Third-party imports
+import httpx
+import pytz
+import requests
+from bs4 import BeautifulSoup
+from geopy.exc import GeocoderTimedOut
+from geopy.geocoders import Nominatim
 from livekit.agents import function_tool, RunContext
 
-# --- BEGIN: Well-known Websites Mapping and Tool ---
-WELL_KNOWN_WEBSITES = {
-    "google": "https://www.google.com/",
-    "bing": "https://www.bing.com/",
-    "yahoo": "https://www.yahoo.com/",
-    "cnn": "https://www.cnn.com/",
-    "bbc": "https://www.bbc.com/",
-    "nytimes": "https://www.nytimes.com/",
-    "fox": "https://www.foxnews.com/",
-    "wikipedia": "https://en.wikipedia.org/",
-    "youtube": "https://www.youtube.com/",
-    "reddit": "https://www.reddit.com/",
-    "twitter": "https://twitter.com/",
-    "facebook": "https://facebook.com/",
-    "linkedin": "https://linkedin.com/",
-    "instagram": "https://instagram.com/",
-    "tiktok": "https://tiktok.com/",
-    "indeed": "https://www.indeed.com/",
-    "locanto": "https://www.locanto.co.za/"
-}
+# Handle relative imports with try/except for flexibility
+try:
+    from puppeteer_crawler import crawl_page
+except ImportError:
+    try:
+        from .puppeteer_crawler import crawl_page
+    except ImportError:
+        logging.warning("puppeteer_crawler module not available")
+        # Define a fallback function
+        async def crawl_page(*args, **kwargs):
+            return "Puppeteer crawler functionality is not available."
 
-# Set of sites that support bang-style queries (e.g., @site query)
-BROWSER_TOOL = {"gemini"}
-
-def sanitize_for_azure(text: str) -> str:
-    """Reword or mask terms that may trigger Azure OpenAI's content filter."""
-    unsafe_terms = {
-        "sex": "intimacy",
-        "sexual": "romantic",
-        "hookup": "meeting",
-        "hookups": "meetings",
-        "anal": "[redacted]",
-        "blowjob": "[redacted]",
-        "quickie": "[redacted]",
-        "incalls": "meetings",
-        "outcalls": "meetings",
-        "massage": "relaxation",
-        "MILF": "person",
-        "fuck": "love",
-        "cunt": "[redacted]",
-        "penis": "[redacted]",
-        "oral": "[redacted]",
-        "wank": "[redacted]",
-        "finger": "[redacted]",
-        "date": "meet",
-        "love": "companionship",
-        "kiss": "affection",
-        "look": "search",
-        "find": "discover",
-        "girl": "woman",
-    }
-    for term, replacement in unsafe_terms.items():
-        # Replace whole words only, case-insensitive
-        text = re.sub(rf'\\b{re.escape(term)}\\b', replacement, text, flags=re.IGNORECASE)
-    return text
-
-# Add this utility function for robust tool output handling
-
-def is_sequence_but_not_str(obj):
-    import collections.abc
-    return isinstance(obj, collections.abc.Sequence) and not isinstance(obj, (str, bytes, bytearray))
-
-def clean_spoken(text):
-    import re
-    text = re.sub(r'\*\*', '', text)
-    text = re.sub(r'#+', '', text)
-    text = re.sub(r'[\*\_`~\[\]\(\)\>\!]', '', text)
-    text = re.sub(r'^\d+\.\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\d+', '', text)
-    text = text.strip()
-    # Add a period at the end of lists/multi-line outputs if not already present
-    if text and not text.endswith('.'):
-        # If the text is a list (multiple lines), add a period at the end
-        if '\n' in text:
-            text += '.'
-    return text
-
-def handle_tool_results(session, results) -> None:
-    """Speak tool results: if a single result, speak it; if multiple, combine and speak once."""
-    from .agent_utils import speak_chunks
-    if is_sequence_but_not_str(results):
-        combined = '\n\n'.join(str(r) for r in results if r)
-        combined = clean_spoken(combined)
-        return speak_chunks(session, combined, max_auto_chunks=MAX_AUTO_CHUNKS, pause=CHUNK_PAUSE)
-    else:
-        results = clean_spoken(results)
-        return speak_chunks(session, results, max_auto_chunks=MAX_AUTO_CHUNKS, pause=CHUNK_PAUSE) # type: ignore
-
-
-class AIVoiceAssistant:
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(AIVoiceAssistant, cls).__new__(cls)
-            cls._instance.vad = None
-            cls._instance.session = None
-            cls._instance.agent = None
-            # Initialize Wikipedia API
-            cls._instance.wiki_wiki = wikipediaapi.Wikipedia(
-                language='en',
-                extract_format=wikipediaapi.ExtractFormat.WIKI,
-                user_agent='AIVoiceAssistant/1.0'
-            )
-            # Initialize geocoder with a user agent for weather and location services
-            cls._instance.geolocator = Nominatim(user_agent="AIVoiceAssistant/1.0")
-            # Cache dictionaries
-            cls._instance.weather_cache = {}  # Cache weather data
-            cls._instance.wiki_cache = {}     # Cache wikipedia lookups
-            cls._instance.news_cache = {}     # Cache news lookups
-            cls._instance.crawl_cache = {}    # Cache web crawl results
-            print("All search and lookup clients initialized")
-        return cls._instance
-
-    def initialize_vad(self, proc: JobProcess):
-        """Initialize Voice Activity Detection with all relevant parameters from env vars"""
-        if self.vad is None:
-            import os
-            threshold = float(os.environ.get("VAD_THRESHOLD", 0.5))
-            min_speech = float(os.environ.get("VAD_MIN_SPEECH", 0.1))
-            min_silence = float(os.environ.get("VAD_MIN_SILENCE", 0.5))
-            debug = os.environ.get("VAD_DEBUG", "false").lower() in ("1", "true", "yes", "on")
-            try:
-                proc.userdata["vad"] = silero.VAD.load(
-                    threshold=threshold,
-                    min_speech_duration=min_speech,
-                    min_silence_duration=min_silence,
-                    debug=debug
-                )
-                print(f"[VAD] Loaded with threshold={threshold}, min_speech={min_speech}, min_silence={min_silence}, debug={debug}")
-            except TypeError:
-                # Fallback if silero.VAD.load does not accept these params
-                proc.userdata["vad"] = silero.VAD.load()
-                print(f"[VAD] Loaded with default params (full config not supported)")
-            self.vad = proc.userdata["vad"]
-
-
-    def __init__(self):
-        """Initialize the AIVoiceAssistant with necessary components"""
-        if not hasattr(self, '_instance'):
-            self._instance = None
-            self.vad = None
-            self.session = None
-            self.agent = None
-            # Initialize Wikipedia API
-            self.wiki_wiki = wikipediaapi.Wikipedia(
-                language='en',
-                extract_format=wikipediaapi.ExtractFormat.WIKI,
-                user_agent='AIVoiceAssistant/1.0'
-            )
-            # Initialize geocoder
-            self.geolocator = Nominatim(user_agent="AIVoiceAssistant/1.0")
-            # Cache dictionaries
-            self.weather_cache = {}
-            self.wiki_cache = {}
-            self.news_cache = {}
-            self.crawl_cache = {}
-            # Store cookies between requests
-            self.cookies = {}
-            # Default headers for HTTP requests
-            self.default_headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'DNT': '1'
-            }
-            print("All search and lookup clients initialized")
-
-    def _update_headers(self, url: str) -> Dict[str, str]:
-        """Update headers for each request to maintain session-like behavior"""
-        headers = self.client.headers.copy()
-        headers.update({
-            'Referer': url,
-            'Cookie': '; '.join([f'{k}={v}' for k, v in self.cookies.items()])
-        })
-        return headers
-
-    async def _update_cookies(self, response: httpx.Response) -> None:
-        """Update stored cookies from response"""
-        if 'set-cookie' in response.headers:
-            for cookie in response.headers.getlist('set-cookie'):
-                if '=' in cookie:
-                    name, value = cookie.split('=', 1)
-                    value = value.split(';')[0]
-                    self.cookies[name] = value
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get an HTTP client for making requests"""
-        return httpx.AsyncClient(
-            timeout=30.0,
-            follow_redirects=True,
-            headers=self.default_headers
-        )
+# Handle utils import with try/except
+try:
+    from utils import sanitize_for_azure, clean_spoken, handle_tool_results
+except ImportError:
+    try:
+        from .utils import sanitize_for_azure, clean_spoken, handle_tool_results
+    except ImportError:
+        logging.warning("utils module not available, using fallback definitions")
+        # Fallback definitions
+        def sanitize_for_azure(text):
+            return text
+            
+        def clean_spoken(text):
+            return text
+            
+        async def handle_tool_results(session, text):
+            pass
 
 @function_tool
-async def get_current_time(self, context: RunContext, timezone: str = "UTC") -> str:
+async def get_current_time(context: RunContext, timezone: str = "UTC") -> str:
     """Get the current time in the specified timezone.
     
     Args:
@@ -248,19 +89,29 @@ async def get_current_date(context: RunContext) -> str:
         return "I couldn't get the current date and time."
 
 @function_tool
-def get_current_date_and_timezone(context: RunContext) -> str:
+async def get_current_date_and_timezone(context: RunContext) -> str:
     """Get the current server date and time in a natural language format with timezone."""
     try:
         # Get local timezone
         local_tz = pytz.timezone(os.environ.get('TZ', 'Etc/UTC'))
         now = datetime.now(local_tz)
         timezone_name = local_tz.zone
-    except Exception:
-        now = datetime.now()
-        timezone_name = time.tzname[0]
+    except Exception as e:
+        logging.error(f"Timezone error: {e}")
+        # Fallback to UTC
+        now = datetime.now(pytz.UTC)
+        timezone_name = "UTC"
+        
     date_str = now.strftime("%A, %B %d, %Y")
     time_str = now.strftime("%I:%M %p")
-    return f"{time_str} on {date_str} in the {timezone_name} timezone"
+    response = f"{time_str} on {date_str} in the {timezone_name} timezone"
+    
+    # Handle speech output if session is available
+    session = getattr(context, 'session', None)
+    if session:
+        await handle_tool_results(session, response)
+        return "Here's the current date and time. I'll read it to you."
+    return response
  
 @function_tool
 async def get_weather(context: RunContext, location: str) -> str:
@@ -407,7 +258,38 @@ async def calculate(context: RunContext, expression: str) -> str:
             msg = sanitize_for_azure(msg)
             logging.info(f"[TOOL] calculate: {msg}")
             return msg
-        result = eval(cleaned_expr)
+        # Use safer calculation method with ast
+        import ast
+        import operator
+        
+        # Define safe operations
+        safe_operators = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.Pow: operator.pow,
+            ast.Mod: operator.mod,
+            ast.USub: operator.neg,  # Unary negation
+        }
+        
+        def safe_eval(node):
+            if isinstance(node, ast.Num):
+                return node.n
+            elif isinstance(node, ast.BinOp):
+                left = safe_eval(node.left)
+                right = safe_eval(node.right)
+                return safe_operators[type(node.op)](left, right)
+            elif isinstance(node, ast.UnaryOp):
+                operand = safe_eval(node.operand)
+                return safe_operators[type(node.op)](operand)
+            else:
+                raise TypeError(f"Unsupported operation: {node.__class__.__name__}")
+        
+        # Parse the expression into an AST
+        parsed_expr = ast.parse(cleaned_expr, mode='eval').body
+        # Evaluate the expression safely
+        result = safe_eval(parsed_expr)
         if isinstance(result, float):
             formatted_result = f"{result:.4f}".rstrip('0').rstrip('.') if '.' in f"{result:.4f}" else f"{result:.0f}"
         else:
@@ -425,7 +307,7 @@ async def calculate(context: RunContext, expression: str) -> str:
         return sanitize_for_azure(f"I couldn't calculate '{expression}'. Please try with a simpler expression or check the format.")
 
 @function_tool
-async def calculate_math(self, context: RunContext, expression: str) -> str:
+async def calculate_math(context: RunContext, expression: str) -> str:
     """Evaluate a mathematical expression.
     
     Args:
@@ -443,16 +325,50 @@ async def calculate_math(self, context: RunContext, expression: str) -> str:
         # Replace ^ with ** for exponentiation
         expression = expression.replace('^', '**')
         
-        # Evaluate in a restricted environment
-        result = eval(expression, {"__builtins__": None}, {})
-        return f"The result of {expression} is {result}."
+        # Use safer calculation method
+        import ast
+        import operator
+        
+        # Define safe operations
+        safe_operators = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.Pow: operator.pow,
+            ast.Mod: operator.mod,
+            ast.USub: operator.neg,  # Unary negation
+        }
+        
+        def safe_eval(node):
+            if isinstance(node, ast.Num):
+                return node.n
+            elif isinstance(node, ast.BinOp):
+                left = safe_eval(node.left)
+                right = safe_eval(node.right)
+                return safe_operators[type(node.op)](left, right)
+            elif isinstance(node, ast.UnaryOp):
+                operand = safe_eval(node.operand)
+                return safe_operators[type(node.op)](operand)
+            else:
+                raise TypeError(f"Unsupported operation: {node.__class__.__name__}")
+        
+        try:
+            # Parse the expression into an AST
+            parsed_expr = ast.parse(expression, mode='eval').body
+            # Evaluate the expression safely
+            result = safe_eval(parsed_expr)
+            return f"The result of {expression} is {result}."
+        except Exception as e:
+            logging.error(f"AST evaluation error: {e}")
+            return sanitize_for_azure(f"I couldn't calculate '{expression}'. Please try with a simpler expression.")
         
     except Exception as e:
         logging.error(f"Calculation error: {e}", exc_info=True)
         return "I couldn't evaluate that expression. Please check the format and try again."
 
 @function_tool
-async def evaluate_expression(self, context: RunContext, expression: str) -> str:
+async def evaluate_expression(context: RunContext, expression: str) -> str:
     """Evaluate a mathematical expression.
     
     Args:
@@ -464,94 +380,225 @@ async def evaluate_expression(self, context: RunContext, expression: str) -> str
     """
     try:
         # Basic safety check
-        if not re.match(r'^[0-9+\-*/().\s]+$', expression):
-            return "Invalid expression. Only numbers and basic arithmetic operators are allowed."
+        if not re.match(r'^[0-9+\-*/().\s^%]+$', expression):
+            error_msg = "Invalid expression. Only numbers and basic arithmetic operators are allowed."
+            error_msg = sanitize_for_azure(error_msg)
             
-        result = eval(expression, {"__builtins__": None}, {})
-        return f"The result of {expression} is {result}."
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, error_msg)
+                return "I can't process that expression. Please try again with basic math operators."
+            return error_msg
+            
+        # Replace ^ with ** for exponentiation
+        expression = expression.replace('^', '**')
+        
+        # Use safer calculation method with ast
+        import ast
+        import operator
+        
+        # Define safe operations
+        safe_operators = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.Pow: operator.pow,
+            ast.Mod: operator.mod,
+            ast.USub: operator.neg,  # Unary negation
+        }
+        
+        def safe_eval(node):
+            if isinstance(node, ast.Num):
+                return node.n
+            elif isinstance(node, ast.BinOp):
+                left = safe_eval(node.left)
+                right = safe_eval(node.right)
+                return safe_operators[type(node.op)](left, right)
+            elif isinstance(node, ast.UnaryOp):
+                operand = safe_eval(node.operand)
+                return safe_operators[type(node.op)](operand)
+            else:
+                raise TypeError(f"Unsupported operation: {node.__class__.__name__}")
+        
+        # Parse the expression into an AST
+        parsed_expr = ast.parse(expression, mode='eval').body
+        # Evaluate the expression safely
+        result = safe_eval(parsed_expr)
+        
+        # Format the result
+        if isinstance(result, float):
+            formatted_result = f"{result:.4f}".rstrip('0').rstrip('.') if '.' in f"{result:.4f}" else f"{result:.0f}"
+        else:
+            formatted_result = str(result)
+            
+        response = f"The result of {expression.replace('**', '^')} is {formatted_result}."
+        response = sanitize_for_azure(response)
+        
+        # Handle session output for voice responses
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, response)
+            return "Here's the result. I'll read it to you."
+        return response
         
     except Exception as e:
-        logging.error(f"Calculation error: {e}")
-        return "I couldn't evaluate that expression. Please check the format and try again."
+        logging.error(f"Calculation error: {e}", exc_info=True)
+        error_msg = f"I couldn't evaluate '{expression}'. Please check the format and try again."
+        error_msg = sanitize_for_azure(error_msg)
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I couldn't calculate that. Please try a different expression."
+        return error_msg
 
 @function_tool
-async def take_screenshot(self, context: RunContext, url: str, selector: str = "body") -> str:
-    """Take a screenshot of a webpage or specific element.
+async def take_screenshot(context: RunContext, url: str, selector: str = "body") -> str:
+    """Take a screenshot of a webpage and return a description.
     
     Args:
         context: The run context for the tool
-        url: The URL to capture
-        selector: CSS selector for specific element (default: whole page)
+        url: The URL of the webpage to screenshot
+        selector: CSS selector to screenshot (defaults to entire page)
         
     Returns:
-        str: Path to the screenshot or error message
+        str: A description of the screenshot or an error message
     """
     try:
+        from playwright.async_api import async_playwright
+        import os
+        import time
+        
+        # Ensure URL has a scheme
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        
+        logging.info(f"[TOOL] take_screenshot: Taking screenshot of {url} with selector {selector}")
+        
         # Create screenshots directory if it doesn't exist
         os.makedirs('screenshots', exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        screenshot_path = f"screenshots/screenshot_{timestamp}.png"
+        screenshot_path = f"screenshots/screenshot_{int(time.time())}.png"
         
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(viewport={'width': 1280, 'height': 800})
             page = await context.new_page()
             
-            # Navigate to the page
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            if not response or not response.ok:
-                return f"Failed to load {url}. Status: {response.status if response else 'No response'}"
+            # Navigate to the page with timeout
+            try:
+                response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                if not response or not response.ok:
+                    await browser.close()
+                    error_msg = f"Failed to load {url}. Status: {response.status if response else 'No response'}"
+                    error_msg = sanitize_for_azure(error_msg)
+                    
+                    session = getattr(context, 'session', None)
+                    if session:
+                        await handle_tool_results(session, error_msg)
+                        return "I couldn't load that webpage."
+                    return error_msg
+            except Exception as nav_error:
+                await browser.close()
+                logging.error(f"Navigation error: {nav_error}")
+                error_msg = f"Error loading {url}: {str(nav_error)}"
+                error_msg = sanitize_for_azure(error_msg)
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, error_msg)
+                    return "I had trouble loading that webpage."
+                return error_msg
             
             # Wait for the page to be fully loaded
-            await page.wait_for_load_state('networkidle')
-            
-            # Wait for the selector to be present
             try:
-                await page.wait_for_selector(selector, state='attached', timeout=10000)
-                # Scroll to the element to ensure it's in view
+                await page.wait_for_load_state('networkidle', timeout=10000)
+            except Exception as load_error:
+                logging.warning(f"Page load state timeout: {load_error}")
+                # Continue anyway, as the page might still be usable
+            
+            # Try to find the specified element
+            try:
+                await page.wait_for_selector(selector, state='attached', timeout=5000)
                 element = page.locator(selector)
                 await element.scroll_into_view_if_needed()
                 # Add a small delay to ensure any lazy-loaded content is visible
                 await asyncio.sleep(1)
-            except Exception as e:
-                logging.warning(f"Selector {selector} not found: {e}")
+            except Exception as selector_error:
+                logging.warning(f"Selector {selector} not found: {selector_error}")
                 # If specific selector not found, take full page screenshot
                 selector = 'body'
                 element = page.locator(selector)
             
             # Take screenshot with retry logic
             max_retries = 2
+            success = False
             for attempt in range(max_retries):
                 try:
-                    await element.screenshot(
-                        path=screenshot_path,
-                        type='png',
-                        timeout=10000
-                    )
+                    await element.screenshot(path=screenshot_path, timeout=10000)
+                    success = True
                     break
-                except Exception as e:
+                except Exception as screenshot_error:
                     if attempt == max_retries - 1:
-                        raise e
+                        await browser.close()
+                        logging.error(f"Screenshot error: {screenshot_error}")
+                        error_msg = f"Failed to take screenshot: {str(screenshot_error)}"
+                        error_msg = sanitize_for_azure(error_msg)
+                        
+                        session = getattr(context, 'session', None)
+                        if session:
+                            await handle_tool_results(session, error_msg)
+                            return "I couldn't take a screenshot of that webpage."
+                        return error_msg
                     await asyncio.sleep(1)
             
             # Clean up
             await browser.close()
             
-            # Verify the screenshot was created
-            if os.path.exists(screenshot_path):
+            if success and os.path.exists(screenshot_path):
                 file_size = os.path.getsize(screenshot_path) / 1024  # Size in KB
                 if file_size < 1:  # If file is too small, it might be empty
-                    raise Exception("Screenshot file is too small")
-                return f"Screenshot saved as {os.path.abspath(screenshot_path)}"
+                    error_msg = "Screenshot file is too small or empty"
+                    error_msg = sanitize_for_azure(error_msg)
+                    
+                    session = getattr(context, 'session', None)
+                    if session:
+                        await handle_tool_results(session, error_msg)
+                        return "I couldn't capture a proper screenshot of that webpage."
+                    return error_msg
+                
+                response = f"I've taken a screenshot of {url} focusing on the '{selector}' element. The screenshot has been saved as {os.path.abspath(screenshot_path)}"
+                response = sanitize_for_azure(response)
+                
+                # Handle session output for voice responses
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, response)
+                    return "I've taken a screenshot of that webpage."
+                return response
             else:
-                raise Exception("Failed to save screenshot")
+                error_msg = "Failed to save screenshot"
+                error_msg = sanitize_for_azure(error_msg)
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, error_msg)
+                    return "I couldn't save the screenshot."
+                return error_msg
             
     except Exception as e:
         logging.error(f"Screenshot error: {e}", exc_info=True)
-        return f"I couldn't take a screenshot: {str(e)}. Please try again or check the URL and selector."
+        error_msg = f"I couldn't take a screenshot: {str(e)}. Please try again or check the URL and selector."
+        error_msg = sanitize_for_azure(error_msg)
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I encountered an error while taking the screenshot."
+        return error_msg
 
 @function_tool
-async def clean_html(self, context: RunContext, html_content: str) -> str:
+async def clean_html(context: RunContext, html_content: str) -> str:
     """Clean and sanitize HTML content, removing scripts and unwanted tags.
     
     Args:
@@ -559,48 +606,64 @@ async def clean_html(self, context: RunContext, html_content: str) -> str:
         html_content: The HTML content to clean
         
     Returns:
-        str: Cleaned HTML or text content
+        str: The cleaned HTML content
     """
     try:
-        # Create a cleaner that removes scripts, styles, etc.
-        from lxml import html
-        from lxml_html_clean import Cleaner
+        from bs4 import BeautifulSoup
         
-        cleaner = Cleaner(
-            scripts=True,
-            javascript=True,
-            style=True,
-            links=True,
-            meta=True,
-            page_structure=False,
-            safe_attrs_only=True,
-            safe_attrs=frozenset(['src', 'alt', 'href', 'title', 'width', 'height'])
-        )
+        if not html_content or not isinstance(html_content, str):
+            error_msg = "Invalid HTML content provided. Please provide valid HTML content."
+            error_msg = sanitize_for_azure(error_msg)
+            
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, error_msg)
+                return "I couldn't process that HTML content."
+            return error_msg
         
-        # Parse the HTML
-        doc = html.document_fromstring(html_content)
+        logging.info(f"[TOOL] clean_html: Cleaning HTML content of length {len(html_content)}")
         
-        # Clean the document
-        cleaned_doc = cleaner.clean_html(doc)
+        # Parse the HTML with BeautifulSoup
+        soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Convert back to string
-        result = html.tostring(cleaned_doc, encoding='unicode', pretty_print=True)
+        # Remove script, style, and iframe tags for security
+        for tag in soup(["script", "style", "iframe", "noscript"]):
+            tag.extract()
         
-        # Remove multiple spaces and newlines
-        result = ' '.join(result.split())
+        # Get text
+        text = soup.get_text(separator=' ', strip=True)
+        
+        # Remove excessive whitespace
+        import re
+        text = re.sub(r'\s+', ' ', text).strip()
         
         # Truncate if too long
-        if len(result) > 4000:
-            result = result[:4000] + '... [content truncated]'
-            
-        return result
+        if len(text) > 8000:
+            text = text[:8000] + "... [content truncated]"
+        
+        response = f"Cleaned HTML content:\n\n{text}"
+        response = sanitize_for_azure(response)
+        
+        # Handle session output for voice responses
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, response)
+            return "I've cleaned the HTML content. Here's a summary of what I found."
+        return response
         
     except Exception as e:
         logging.error(f"HTML cleaning error: {e}", exc_info=True)
-        return f"I couldn't clean the HTML content: {str(e)}"
+        error_msg = f"I couldn't clean the HTML content: {str(e)}"
+        error_msg = sanitize_for_azure(error_msg)
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I encountered an error while cleaning the HTML content."
+        return error_msg
 
 @function_tool
-async def extract_links(self, context: RunContext, url: str, filter_pattern: str = None) -> str:
+async def extract_links(context: RunContext, url: str, filter_pattern: str = None) -> str:
     """Extract all links from a webpage, optionally filtered by a pattern.
     
     Args:
@@ -609,55 +672,106 @@ async def extract_links(self, context: RunContext, url: str, filter_pattern: str
         filter_pattern: Optional regex pattern to filter links
         
     Returns:
-        str: Formatted list of links
+        str: A list of extracted links
     """
     try:
-        # Fetch the page content
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=10.0, follow_redirects=True)
-            response.raise_for_status()
-            html_content = response.text
+        import re
+        import httpx
+        from bs4 import BeautifulSoup
+        
+        # Ensure URL has a scheme
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        
+        logging.info(f"[TOOL] extract_links: Extracting links from {url} with filter {filter_pattern if filter_pattern else 'None'}")
+        
+        # Fetch the webpage
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, follow_redirects=True, timeout=30.0)
+                response.raise_for_status()
+        except httpx.HTTPError as http_error:
+            error_msg = f"Failed to fetch {url}: {str(http_error)}"
+            error_msg = sanitize_for_azure(error_msg)
+            
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, error_msg)
+                return "I couldn't access that webpage."
+            return error_msg
         
         # Parse HTML
-        soup = BeautifulSoup(html_content, 'html5lib')
+        soup = BeautifulSoup(response.text, 'html.parser')
         
         # Extract all links
         links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            text = a.get_text(strip=True) or '[No text]'
+        for link in soup.find_all('a', href=True):
+            href = link['href']
             
-            # Make relative URLs absolute
-            if not href.startswith(('http://', 'https://', 'mailto:', 'tel:')):
+            # Convert relative URLs to absolute
+            if href.startswith('/'):
+                href = url.rstrip('/') + href
+            elif not href.startswith(('http://', 'https://')):
+                # Handle other relative URLs
+                from urllib.parse import urljoin
                 href = urljoin(url, href)
             
-            # Filter if pattern is provided
+            # Filter links if pattern provided
             if filter_pattern:
-                if re.search(filter_pattern, href, re.IGNORECASE):
-                    links.append((text, href))
-            else:
-                links.append((text, href))
+                try:
+                    if not re.search(filter_pattern, href, re.IGNORECASE):
+                        continue
+                except re.error as regex_error:
+                    error_msg = f"Invalid regex pattern '{filter_pattern}': {str(regex_error)}"
+                    error_msg = sanitize_for_azure(error_msg)
+                    
+                    session = getattr(context, 'session', None)
+                    if session:
+                        await handle_tool_results(session, error_msg)
+                        return "The filter pattern you provided isn't valid. Please try again with a valid regex pattern."
+                    return error_msg
+                
+            links.append(href)
         
-        # Format the results
+        # Remove duplicates
+        links = list(dict.fromkeys(links))
+        
         if not links:
-            return "No links found" + (f" matching pattern '{filter_pattern}'" if filter_pattern else "")
+            no_links_msg = f"No links found on {url}" + (f" matching pattern '{filter_pattern}'" if filter_pattern else "")
+            no_links_msg = sanitize_for_azure(no_links_msg)
+            
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, no_links_msg)
+                return "I couldn't find any links on that webpage."
+            return no_links_msg
         
-        result = f"Found {len(links)} links"
-        if filter_pattern:
-            result += f" matching pattern '{filter_pattern}'"
-        result += ":\n\n"
-        
-        for i, (text, href) in enumerate(links[:20], 1):  # Limit to 20 links
-            result += f"{i}. {text}\n   {href}\n"
-        
+        result = f"Found {len(links)} links" + (f" matching pattern '{filter_pattern}'" if filter_pattern else "") + f" on {url}:\n\n"
+        for i, link in enumerate(links[:20], 1):
+            result += f"{i}. {link}\n"
+            
         if len(links) > 20:
-            result += f"\n... and {len(links) - 20} more links not shown."
+            result += f"\n... and {len(links) - 20} more links."
         
+        result = sanitize_for_azure(result)
+        
+        # Handle session output for voice responses
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, result)
+            return f"I found {len(links)} links on that webpage. I'll read some of them to you."
         return result
         
     except Exception as e:
         logging.error(f"Link extraction error: {e}", exc_info=True)
-        return f"I couldn't extract links from the page: {str(e)}"
+        error_msg = f"I couldn't extract links from {url}: {str(e)}"
+        error_msg = sanitize_for_azure(error_msg)
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I encountered an error while extracting links from that webpage."
+        return error_msg
 
 @function_tool
 async def open_website(context: RunContext, url: str, description: str = "") -> dict:
@@ -781,64 +895,151 @@ async def web_crawl(context: RunContext, url: str, selector: str = "", max_pages
         return sanitize_for_azure(f"I tried to crawl {url}, but encountered a technical issue. Let me know if you need help with something else.")
 
 @function_tool
-async def scrape_website(self, context: RunContext, url: str, selector: str = "body", text_only: bool = True) -> str:
-    """Scrape content from a website using Playwright.
+async def scrape_website(context: RunContext, url: str, selector: str = "body", text_only: bool = True) -> str:
+    """Scrape content from a website using a CSS selector.
     
     Args:
         context: The run context for the tool
         url: The URL to scrape
-        selector: CSS selector to target specific elements
-        text_only: Whether to return only text content
-            
+        selector: CSS selector to target specific content (default: body)
+        text_only: Whether to return only text or HTML (default: True)
+        
     Returns:
-        str: Extracted content from the webpage
+        str: The scraped content
     """
     try:
+        from playwright.async_api import async_playwright
+        
+        # Ensure URL has a scheme
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        
+        logging.info(f"[TOOL] scrape_website: Scraping {url} with selector {selector}, text_only={text_only}")
+            
         async with async_playwright() as p:
+            # Launch browser with a timeout
             browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
+            context = await browser.new_context(viewport={'width': 1280, 'height': 800})
             page = await context.new_page()
             
-            # Set a reasonable timeout
-            page.set_default_timeout(30000)  # 30 seconds
+            # Navigate to the page with timeout
+            try:
+                response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                if not response or not response.ok:
+                    await browser.close()
+                    error_msg = f"Failed to load {url}. Status: {response.status if response else 'No response'}"
+                    error_msg = sanitize_for_azure(error_msg)
+                    
+                    session = getattr(context, 'session', None)
+                    if session:
+                        await handle_tool_results(session, error_msg)
+                        return "I couldn't access that webpage."
+                    return error_msg
+            except Exception as nav_error:
+                await browser.close()
+                logging.error(f"Navigation error: {nav_error}")
+                error_msg = f"Error loading {url}: {str(nav_error)}"
+                error_msg = sanitize_for_azure(error_msg)
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, error_msg)
+                    return "I had trouble loading that webpage."
+                return error_msg
             
-            # Navigate to the page
-            response = await page.goto(url, wait_until="domcontentloaded")
-            if not response or not response.ok:
-                return f"Failed to load {url}. Status: {response.status if response else 'No response'}"
+            # Wait for the page to be fully loaded
+            try:
+                await page.wait_for_load_state('networkidle', timeout=10000)
+            except Exception as load_error:
+                logging.warning(f"Page load state timeout: {load_error}")
+                # Continue anyway, as the page might still be usable
             
-            # Wait for the selector to be present
+            # Wait for selector
             try:
                 await page.wait_for_selector(selector, timeout=10000)
             except Exception as e:
                 logging.warning(f"Selector {selector} not found: {e}")
+                await browser.close()
+                error_msg = f"Could not find element matching selector '{selector}' on the page."
+                error_msg = sanitize_for_azure(error_msg)
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, error_msg)
+                    return "I couldn't find that element on the webpage."
+                return error_msg
             
             # Extract content based on parameters
-            if text_only:
-                content = await page.locator(selector).inner_text()
-            else:
-                content = await page.locator(selector).inner_html()
+            try:
+                if text_only:
+                    content = await page.locator(selector).inner_text()
+                else:
+                    content = await page.locator(selector).inner_html()
+            except Exception as extract_error:
+                await browser.close()
+                logging.error(f"Content extraction error: {extract_error}")
+                error_msg = f"Error extracting content from selector '{selector}': {str(extract_error)}"
+                error_msg = sanitize_for_azure(error_msg)
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, error_msg)
+                    return "I had trouble extracting content from that webpage."
+                return error_msg
             
             # Clean up
             await browser.close()
             
             # Clean and truncate the content
-            content = ' '.join(content.split())
-            if len(content) > 4000:  # Limit response length
-                content = content[:4000] + '... [content truncated]'
+            import re
+            content = re.sub(r'\s+', ' ', content).strip()
+            if len(content) > 8000:  # Limit response length
+                content = content[:8000] + '... [content truncated]'
             
-            return content
+            if not content.strip():
+                error_msg = f"No content found in the selected element on {url}"
+                error_msg = sanitize_for_azure(error_msg)
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, error_msg)
+                    return "I couldn't find any content in that element."
+                return error_msg
+            
+            response = f"Content from {url} (selector: {selector}):\n\n{content}"
+            response = sanitize_for_azure(response)
+            
+            # Handle session output for voice responses
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, response)
+                return "I've scraped the content from that webpage. Here's what I found."
+            return response
             
     except Exception as e:
         logging.error(f"Web scraping error: {e}", exc_info=True)
-        return f"I encountered an error while scraping the website: {str(e)}"
+        error_msg = f"I encountered an error while scraping {url}: {str(e)}"
+        error_msg = sanitize_for_azure(error_msg)
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I encountered an error while scraping that webpage."
+        return error_msg
     
 @function_tool
 async def web_search(context: RunContext, query: str) -> str:
     import logging
     from bs4 import BeautifulSoup
     try:
-        from .bing_playwright_scraper import scrape_bing
+        try:
+            from bing_playwright_scraper import scrape_bing
+        except ImportError:
+            try:
+                from .bing_playwright_scraper import scrape_bing
+            except ImportError:
+                logging.error("bing_playwright_scraper module not available")
+                return f"I couldn't find any results for '{query}'. The search functionality is currently unavailable."
         results = await scrape_bing(query, num_results=5)
         logging.info(f"[web_search] Playwright Bing results: {results}")
         if results and isinstance(results, list) and all('title' in r and 'link' in r for r in results):
@@ -855,10 +1056,18 @@ async def web_search(context: RunContext, query: str) -> str:
             return f"I couldn't find any results for '{query}'. Try a different query."
     except Exception as e:
         logging.error(f"[web_search] Playwright Bing failed or returned no results: {e}")
-        return f"I couldn't find any results for '{query}'. Try a different query."
+        error_msg = f"I couldn't find any results for '{query}'. Try a different query or approach."
+        error_msg = sanitize_for_azure(error_msg)
+        
+        # Handle session output for voice responses
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I couldn't find any results for your search."
+        return error_msg
 
 @function_tool
-async def google_search(self, context: RunContext, query: str, num_results: int = 5) -> str:
+async def google_search(context: RunContext, query: str, num_results: int = 5) -> str:
     """Search the web for information using Google Search.
         
     Args:
@@ -873,7 +1082,9 @@ async def google_search(self, context: RunContext, query: str, num_results: int 
         num_results = max(1, min(10, int(num_results)))
         search_results = []
         
-        for result in google_search(query, num_results=num_results):
+        # Import the library locally to avoid name collision
+        from googlesearch import search as google_search_lib
+        for result in google_search_lib(query, num_results=num_results):
             title = result.split('/')[-1].replace('-', ' ').title()
             search_results.append({
                 'title': title,
@@ -887,14 +1098,21 @@ async def google_search(self, context: RunContext, query: str, num_results: int 
         for i, result in enumerate(search_results, 1):
             response += f"{i}. {result['title']}\n   {result['url']}\n\n"
         
-        return response.strip()
+        response = sanitize_for_azure(response.strip())
+        
+        # Handle session output for voice responses
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, response)
+            return "I've found some results and will read them to you now."
+        return response
         
     except Exception as e:
         logging.error(f"Web search error: {e}", exc_info=True)
         return "I encountered an error while searching the web. Please try again later."
 
 @function_tool
-async def wikipedia_search(self, context: RunContext, query: str) -> str:
+async def wikipedia_search(context: RunContext, query: str) -> str:
     """Search for information on Wikipedia.
     
     Args:
@@ -918,11 +1136,27 @@ async def wikipedia_search(self, context: RunContext, query: str) -> str:
         # Get the first two paragraphs of the summary
         summary = '\n\n'.join(page.summary.split('\n\n')[:2])
         
-        return f"According to Wikipedia: {summary}\n\nRead more: {page.fullurl}"
+        response = f"According to Wikipedia: {summary}\n\nRead more: {page.fullurl}"
+        response = sanitize_for_azure(response)
+        
+        # Handle session output for voice responses
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, response)
+            return "Here's what I found on Wikipedia. I'll read it to you."
+        return response
         
     except Exception as e:
         logging.error(f"Wikipedia search error: {e}", exc_info=True)
-        return "I encountered an error while searching Wikipedia."
+        error_msg = f"I encountered an error while searching Wikipedia for '{query}'. Let me answer based on what I know."
+        error_msg = sanitize_for_azure(error_msg)
+        
+        # Handle session output for voice responses
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I'll share what I know about this topic."
+        return error_msg
 
 @function_tool
 async def wiki_lookup(context: RunContext, topic: str) -> str:
@@ -977,36 +1211,104 @@ async def wiki_lookup(context: RunContext, topic: str) -> str:
         return sanitize_for_azure(f"I tried looking up '{topic}' on Wikipedia, but encountered a technical issue. Let me answer based on what I know.")
 
 @function_tool
-async def global_web_search(query, num_results=10):
-    import asyncio
+async def fallback_web_search(context: RunContext, query: str, num_results: int = 10) -> str:
+    """Search the web for information using multiple search engines when the primary search fails.
+        
+    Args:
+        context: The run context for the tool
+        query: The search query
+        num_results: Number of results to return (1-10)
+        
+    Returns:
+        str: Formatted search results with titles and URLs
+    """
+    # Define fallback search URLs
+    SEARXNG_FALLBACK = "https://searx.be/search"
+    SAPTI_FALLBACK = "https://search.sapti.me/search"
+    FALLBACK_URL = "https://duckduckgo.com/"
+    
+    logging.info(f"[TOOL] fallback_web_search called for query: {query}")
+    
+    # Try Bing search first
     try:
-        from .bing_playwright_scraper import scrape_bing
-        loop = asyncio.get_event_loop()
-        results = loop.run_until_complete(scrape_bing(query, num_results=num_results))
+        try:
+            from bing_playwright_scraper import scrape_bing
+        except ImportError:
+            try:
+                from .bing_playwright_scraper import scrape_bing
+            except ImportError:
+                logging.error("bing_playwright_scraper module not available")
+                raise ImportError("bing_playwright_scraper module not available")
+        results = await scrape_bing(query, num_results=num_results)
         if results and isinstance(results, list) and all('title' in r and 'link' in r for r in results):
-            html_results = "".join(f'<a href="{r["link"]}">{r["title"]}</a><br>' for r in results[:num_results])
-            return html_results
+            response = f"Here are the top {len(results)} results for '{query}':\n\n"
+            for i, result in enumerate(results[:num_results], 1):
+                response += f"{i}. {result['title']}\n   {result['link']}\n\n"
+            
+            response = sanitize_for_azure(response)
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, response)
+                return "I've found some results and will read them to you now."
+            return response
     except Exception as e:
-        return f"Error: Bing search failed: {e}"
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200:
-            return resp.text
-    except Exception:
-        pass
+        logging.error(f"[TOOL] fallback_web_search Bing error: {e}")
+    
+    # Try SearXNG
     try:
-        params = {"q": query}
-        resp = requests.get(SEARXNG_FALLBACK, params=params, timeout=10)
-        if resp.status_code == 200:
-            return resp.text
-    except Exception:
-        pass
-    try:
-        params = {"q": query}
-        resp = requests.get(SAPTI_FALLBACK, params=params, timeout=10)
-        if resp.status_code == 200:
-            return resp.text
+        async with httpx.AsyncClient() as client:
+            params = {"q": query}
+            response = await client.get(SEARXNG_FALLBACK, params=params, timeout=10.0)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                results = []
+                for result in soup.select('.result')[:num_results]:
+                    title_elem = result.select_one('.result-title')
+                    url_elem = result.select_one('.result-url')
+                    if title_elem and url_elem:
+                        results.append({
+                            'title': title_elem.get_text(strip=True),
+                            'url': url_elem.get_text(strip=True)
+                        })
+                
+                if results:
+                    response_text = f"Here are the top {len(results)} results for '{query}':\n\n"
+                    for i, result in enumerate(results, 1):
+                        response_text += f"{i}. {result['title']}\n   {result['url']}\n\n"
+                    
+                    response_text = sanitize_for_azure(response_text)
+                    session = getattr(context, 'session', None)
+                    if session:
+                        await handle_tool_results(session, response_text)
+                        return "I've found some results and will read them to you now."
+                    return response_text
     except Exception as e:
-        return f"Error: All search engines failed: {e}"
+        logging.error(f"[TOOL] fallback_web_search SearXNG error: {e}")
+    
+    # Try final fallback
+    try:
+        async with httpx.AsyncClient() as client:
+            params = {"q": query}
+            response = await client.get(FALLBACK_URL, params=params, timeout=10.0)
+            if response.status_code == 200:
+                fallback_msg = f"I found some results for '{query}', but I can't display them in detail. You might want to try searching for this query directly."
+                fallback_msg = sanitize_for_azure(fallback_msg)
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, fallback_msg)
+                    return "I'll share what I found."
+                return fallback_msg
+    except Exception as e:
+        logging.error(f"[TOOL] fallback_web_search final fallback error: {e}")
+    
+    # All searches failed
+    error_msg = f"I couldn't find any results for '{query}' using any available search engines. Please try a different query or approach."
+    error_msg = sanitize_for_azure(error_msg)
+    session = getattr(context, 'session', None)
+    if session:
+        await handle_tool_results(session, error_msg)
+        return "I couldn't find any results for your search."
+    return error_msg
     
 @function_tool
 async def get_fun_content(context: RunContext, content_type: str = "joke") -> str:

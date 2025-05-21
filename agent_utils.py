@@ -4,7 +4,7 @@ from difflib import get_close_matches
 from typing import Dict, Any
 
 # Import the lists from dating.py
-from .locanto_constants import LOCANTO_CATEGORY_SLUGS, LOCANTO_LOCATION_SLUGS, LOCANTO_SECTION_IDS, LOCANTO_TAG_SLUGS
+from locanto_constants import LOCANTO_CATEGORY_SLUGS, LOCANTO_LOCATION_SLUGS, LOCANTO_SECTION_IDS, LOCANTO_TAG_SLUGS
 
 # --- Locanto valid slugs and mapping (auto-generated) ---
 LOCANTO_CATEGORY_SLUGS = set([

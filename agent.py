@@ -19,6 +19,9 @@ import pytz
 import redis as redis_pkg
 import uvicorn
 import wikipediaapi
+
+# Local application imports
+from agent_utils import speak_chunks
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -28,6 +31,83 @@ from lxml_html_clean import Cleaner
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
 from googlesearch import search as google_search
+
+# Local imports
+# Import Locanto module
+try:
+    from locanto import get_locanto_client, LocantoClient, is_valid_locanto_location, is_valid_locanto_category
+    # Initialize locanto client
+    locanto_client = get_locanto_client()
+    HAS_LOCANTO = True
+    
+    # Create a wrapper function for the locanto search
+    async def search_locanto(category_path=['personals', 'men-seeking-men'], location='western-cape', max_pages=3):
+        """Search Locanto for listings in a specific category and location.
+        
+        Args:
+            category_path: List of category path segments (default: ['personals', 'men-seeking-men'])
+            location: Location to search in (default: 'western-cape')
+            max_pages: Maximum number of pages to scrape (default: 3)
+            
+        Returns:
+            List of listings or error message
+        """
+        try:
+            if not is_valid_locanto_location(location):
+                return f"Invalid location: {location}. Please use one of the valid locations."
+                
+            if len(category_path) > 0 and not is_valid_locanto_category(category_path[0]):
+                return f"Invalid category: {category_path[0]}. Please use one of the valid categories."
+                
+            # Get the client and perform the search
+            client = get_locanto_client()
+            listings = await client.locanto_search(category_path=category_path, location=location, max_pages=max_pages)
+            
+            return listings
+        except Exception as e:
+            logging.error(f"Error searching Locanto: {e}")
+            return f"Error searching Locanto: {str(e)}"
+            
+except ImportError as e:
+    logging.warning(f"Locanto module not available: {e}")
+    locanto_client = None
+    HAS_LOCANTO = False
+    
+    # Create a dummy function when Locanto is not available
+    async def search_locanto(*args, **kwargs):
+        return "Locanto search functionality is not available."
+
+# Import Indeed module
+try:
+    from indeed import indeed_job_search
+    HAS_INDEED = True
+except ImportError as e:
+    logging.warning(f"Indeed module not available: {e}")
+    HAS_INDEED = False
+    
+    # Create a dummy function when Indeed is not available
+    @function_tool
+    async def indeed_job_search(context: RunContext, query: str = "customer service", location: str = "Johannesburg, Gauteng") -> str:
+        """Search for jobs on Indeed using Playwright-powered scraping.
+        
+        Args:
+            context: The run context for the tool
+            query: The job search query (job title, keywords, company)
+            location: The location to search for jobs
+            
+        Returns:
+            Formatted job search results or error message
+        """
+        return "Indeed job search functionality is not available."
+            
+except ImportError as e:
+    logging.warning(f"Locanto module not available: {e}")
+    locanto_client = None
+    HAS_LOCANTO = False
+    
+    # Create a dummy function when Locanto is not available
+    async def search_locanto(*args, **kwargs):
+        return "Locanto search functionality is not available."
 
 # LiveKit imports
 from livekit.agents import (
@@ -49,22 +129,138 @@ from mcp_client.agent_tools import MCPToolsIntegration
 
 load_dotenv()
 
+# Fallback URL for error cases
+FALLBACK_URL = "https://fallback"
+
+# --- BEGIN: Well-known Websites Mapping and Tool ---
+WELL_KNOWN_WEBSITES = {
+    "google": "https://www.google.com/",
+    "bing": "https://www.bing.com/",
+    "yahoo": "https://www.yahoo.com/",
+    "cnn": "https://www.cnn.com/",
+    "bbc": "https://www.bbc.com/",
+    "nytimes": "https://www.nytimes.com/",
+    "fox": "https://www.foxnews.com/",
+    "wikipedia": "https://en.wikipedia.org/",
+    "youtube": "https://www.youtube.com/",
+    "reddit": "https://www.reddit.com/",
+    "twitter": "https://twitter.com/",
+    "facebook": "https://facebook.com/",
+    "linkedin": "https://linkedin.com/",
+    "instagram": "https://instagram.com/",
+    "tiktok": "https://tiktok.com/",
+    "indeed": "https://www.indeed.com/",
+    "locanto": "https://www.locanto.co.za/"
+}
+
+# Set of sites that support bang-style queries (e.g., @site query)
+BROWSER_TOOL = {"gemini"}
+
+def sanitize_for_azure(text: str) -> str:
+    """Reword or mask terms that may trigger Azure OpenAI's content filter."""
+    unsafe_terms = {
+        "sex": "intimacy",
+        "sexual": "romantic",
+        "hookup": "meeting",
+        "hookups": "meetings",
+        "anal": "[redacted]",
+        "blowjob": "[redacted]",
+        "quickie": "[redacted]",
+        "incalls": "meetings",
+        "outcalls": "meetings",
+        "massage": "relaxation",
+        "MILF": "person",
+        "fuck": "love",
+        "cunt": "[redacted]",
+        "penis": "[redacted]",
+        "oral": "[redacted]",
+        "wank": "[redacted]",
+        "finger": "[redacted]",
+        "date": "meet",
+        "love": "companionship",
+        "kiss": "affection",
+        "look": "search",
+        "find": "discover",
+        "girl": "woman",
+    }
+    for term, replacement in unsafe_terms.items():
+        # Replace whole words only, case-insensitive
+        text = re.sub(rf'\\b{re.escape(term)}\\b', replacement, text, flags=re.IGNORECASE)
+    return text
+
+# Add this utility function for robust tool output handling
+
+def is_sequence_but_not_str(obj):
+    import collections.abc
+    return isinstance(obj, collections.abc.Sequence) and not isinstance(obj, (str, bytes, bytearray))
+
+def clean_spoken(text):
+    import re
+    text = re.sub(r'\*\*', '', text)
+    text = re.sub(r'#+', '', text)
+    text = re.sub(r'[\*\_`~\[\]\(\)\>\!]', '', text)
+    text = re.sub(r'^\d+\.\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\d+', '', text)
+    text = text.strip()
+    # Add a period at the end of lists/multi-line outputs if not already present
+    if text and not text.endswith('.'):
+        # If the text is a list (multiple lines), add a period at the end
+        if '\n' in text:
+            text += '.'
+    return text
+
+def handle_tool_results(session, results) -> None:
+    """Speak tool results: if a single result, speak it; if multiple, combine and speak once."""
+    if is_sequence_but_not_str(results):
+        combined = '\n\n'.join(str(r) for r in results if r)
+        combined = clean_spoken(combined)
+        return speak_chunks(session, combined, max_auto_chunks=MAX_AUTO_CHUNKS, pause=CHUNK_PAUSE)
+    else:
+        results = clean_spoken(results)
+        return speak_chunks(session, results, max_auto_chunks=MAX_AUTO_CHUNKS, pause=CHUNK_PAUSE) # type: ignore
+
 class FunctionAgent(Agent):
     """A LiveKit agent that uses MCP tools from one or more MCP servers."""
 
     def __init__(self):
+        # Get current date for the instructions
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        
         super().__init__(
-            instructions="""
+            instructions=f"""
                 You are Amanda, an advanced AI assistant with access to a comprehensive set of tools and capabilities.
                 Your primary goal is to be helpful, informative, and efficient in your responses.
+                
+                IMPORTANT: Today's date is {current_date}. Your training data only includes information up to August 2024.
+                For any questions about events, developments, or information after August 2024, you MUST use web search tools
+                to provide accurate and up-to-date information. Never rely solely on your training data for time-sensitive questions.
+                
+                TIME-SENSITIVE QUERY PROTOCOL:
+                1. IDENTIFY: Recognize when a query relates to events, people, products, or information that may have changed after August 2024
+                2. SEARCH FIRST: For such queries, ALWAYS use web_search(), google_search(), or get_news() BEFORE responding
+                3. VERIFY: Cross-check information from multiple web sources when possible
+                4. CITE SOURCES: Always mention the sources of your information
+                5. BE TRANSPARENT: If search tools fail, clearly state that you cannot provide up-to-date information
+                
+                Examples of time-sensitive queries that REQUIRE web search:
+                - "Who is the current President of [country]?"
+                - "What is the latest iPhone model?"
+                - "How did [recent sports event] turn out?"
+                - "What are the current COVID-19 guidelines?"
+                - "What's the status of [ongoing situation]?"
+                - "What happened in [recent news event]?"
+                - "What's the current price of [product/stock/cryptocurrency]?"
                 
                 ===== AVAILABLE TOOLS =====
                 
                 [SEARCH & BROWSING]
                 - web_search(query): Search the web for information
-                - bing_web_search(query): Alternative search using Bing
+                - google_search(query, num_results): Search using Google
+                - wikipedia_search(query): Search Wikipedia for information
                 - wiki_lookup(topic): Get detailed information from Wikipedia
+                - fallback_web_search(query, num_results): Alternative search when primary methods fail
                 - web_crawl(url, selector, max_pages): Extract content from web pages
+                - scrape_website(url, selector, text_only): Scrape content from websites
                 - open_website(url): Open a specific website
                 - open_known_website(site_name, query): Open a well-known website (e.g., 'google', 'wikipedia')
                 
@@ -73,12 +269,17 @@ class FunctionAgent(Agent):
                 - search_locanto_browser(query, location, max_pages, tag, category, section, url): Advanced Locanto search
                 - locanto_matchmaking(query, gender, seeking, age, location, tag, category, section, max_pages): Find matches on Locanto
                 - show_top_locanto_categories_and_tags(location): Browse Locanto categories
+                - basic_search_locanto(query, location, category): Basic Locanto search
                 
                 [UTILITIES]
                 - get_weather(location): Get current weather conditions
-                - get_news_headlines(topic, country): Fetch latest news
+                - get_news(topic, country): Fetch latest news
                 - calculate(expression): Evaluate mathematical expressions
-                - get_current_datetime(): Get current date and time
+                - calculate_math(expression): Alternative math evaluation
+                - evaluate_expression(expression): Evaluate complex expressions
+                - get_current_time(timezone): Get current time in specific timezone
+                - get_current_date(): Get current date
+                - get_current_date_and_timezone(): Get date with timezone
                 - get_fun_content(content_type): Get jokes, facts, or trivia
                 - indeed_job_search(query, location): Search for jobs on Indeed
                 
@@ -87,24 +288,34 @@ class FunctionAgent(Agent):
                 - clean_html(html_content): Sanitize HTML content
                 - take_screenshot(url, selector): Capture webpage screenshots
                 
-                ===== GUIDELINES =====
-                1. TOOL SELECTION: Choose the most appropriate tool for each task
-                2. EFFICIENCY: Use the most direct tool that can answer the query
-                3. VERIFICATION: Cross-reference information when possible
-                4. PRIVACY: Never share sensitive personal information
-                5. ATTRIBUTION: Cite sources when using external information
-                6. CLARITY: Ask for clarification if a request is unclear
-                7. CONTEXT: Maintain context from previous interactions
-                8. LIMITATIONS: Be clear about the limitations of your knowledge
+                ===== TOOL USAGE GUIDELINES =====
+                1. PROACTIVE TOOL USE: Automatically use tools whenever they can help answer a query without asking for permission
+                2. AUTO SELECTION: Select and use the most appropriate tool immediately based on the query
+                3. MULTIPLE TOOLS: Chain multiple tools together when necessary to provide comprehensive answers
+                4. VERIFICATION: Cross-reference information from multiple tools when possible
+                5. FALLBACKS: If one tool fails, automatically try alternative tools
+                6. EFFICIENCY: Use the most direct path to answer each query
+                7. CONTEXT AWARENESS: Use previous conversation context to inform tool selection
+                8. TRANSPARENCY: Briefly mention which tools you used to find information
                 
                 ===== BEST PRACTICES =====
-                - For general knowledge: Use wiki_lookup() first
-                - For current information: Use web_search() or get_news_headlines()
-                - For calculations: Use calculate()
-                - For Locanto-related queries: Use the appropriate Locanto tools
-                - For website interaction: Use open_website() or web_crawl()
+                - For general knowledge: Automatically use wiki_lookup() or wikipedia_search()
+                - For current information: ALWAYS use web_search(), google_search() or get_news() without asking
+                - For post-August 2024 information: MANDATORY to use web search tools and cite sources
+                - For calculations: Immediately use calculate() or evaluate_expression()
+                - For Locanto queries: Directly use the appropriate Locanto tools
+                - For website interaction: Use open_website() or web_crawl() proactively
+                - For weather: Use get_weather() without asking for confirmation
+                - For time/date: Use the appropriate time/date functions automatically
+                - For news events: ALWAYS use get_news() to ensure current information
                 
-                Always present information in a clear, organized, and helpful manner.
+                Always be proactive, efficient, and helpful. Use tools automatically without asking for permission.
+                Present information in a clear, organized manner after using the appropriate tools.
+                
+                FINAL REMINDER: You are operating in {current_date}, which is AFTER your knowledge cutoff of August 2024.
+                Your primary responsibility is to provide accurate, up-to-date information. For ANY time-sensitive query,
+                you MUST use web search tools before responding. This is not optional - it is a core requirement of your operation.
+                Failure to use web search for time-sensitive information would result in potentially outdated or incorrect responses.
                 """,
             stt=azure.STT(
                 speech_key=os.environ["AZURE_STT_API_KEY"],
@@ -116,6 +327,8 @@ class FunctionAgent(Agent):
                 azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
                 api_version=os.environ["AZURE_OPENAI_VERSION"],
                 temperature=0.3,  # Lower temperature for more focused and consistent responses
+                parallel_tool_calls=True,
+                # Removed tool_choice parameter to fix API error
             ),
             tts=azure.TTS(
                 speech_key=os.environ["AZURE_TTS_API_KEY"],
@@ -147,72 +360,56 @@ class FunctionAgent(Agent):
                 chat_ctx.add_message(role="assistant", content="Sure, I'll check that for you.")
 
             yield chunk
-            
-# --- END: FunctionAgent ---
 
-# --- BEGIN: TOOLS ---
-# Import tools and utilities from tools.py
-from .tools import (
+# Import tools and functions from tools.py
+from tools import (
     # Tool functions
-    search_locanto,
-    search_locanto_browser,
-    locanto_matchmaking,
-    web_crawl,
-    web_search,
-    get_current_datetime,
-    wiki_lookup,
-    get_news_headlines,
-    get_weather,
-    calculate,
-    get_fun_content,
-    show_top_locanto_categories_and_tags,
-    open_website,
-    indeed_job_search,
-    open_known_website,
-    bing_web_search,
-    
-    # Utility functions
-    handle_tool_results,
-    sanitize_for_azure,
-    clean_spoken,
+    get_current_time,
+    get_current_date,
     get_current_date_and_timezone,
-    is_sequence_but_not_str,
-    
-    # Data models
+    get_weather,
+    get_news,
+    calculate,
+    calculate_math,
+    evaluate_expression,
+    take_screenshot,
+    clean_html,
+    extract_links,
+    open_website,
+    open_known_website,
+    web_crawl,
+    scrape_website,
+    web_search,
+    google_search,
+    wikipedia_search,
+    wiki_lookup,
+    fallback_web_search,
+    get_fun_content
+)
+
+# Import Locanto related functions and classes from locanto.py
+from locanto import (
+    # Classes
     LocantoCategory,
     LocantoListing,
+    LocantoScraper,
     
-    # Validation functions
+    # Constants
+    LOCANTO_LOCATION_SLUGS,
+    LOCANTO_CATEGORY_SLUGS,
+    LOCANTO_SECTION_IDS,
+    LOCANTO_TAG_SLUGS,
+    
+    # Functions
     is_valid_locanto_location,
     is_valid_locanto_category,
     is_valid_locanto_section,
     is_valid_locanto_tag,
     suggest_closest_slug,
-    
-    # Constants and configurations
-    WELL_KNOWN_WEBSITES,
-    
-    # Main class
-    AIVoiceAssistant
+    show_top_locanto_categories_and_tags,
+    basic_search_locanto
 )
-
-# --- TOOL DEFINITIONS (single-source, top-level) ---
-# All tools are now imported from tools.py
-
-# Fallback URL for error cases
-FALLBACK_URL = "https://fallback"
-
-# Locanto configuration
-LOCANTO_LOCATION_SLUGS = ["western-cape", "gauteng", "kwazulu-natal", "eastern-cape",
-                         "free-state", "limpopo", "mpumalanga", "north-west", "northern-cape"]
-LOCANTO_CATEGORY_SLUGS = ["personals", "men-seeking-men", "women-seeking-men", "men-seeking-women", "women-seeking-women"]
-LOCANTO_SECTION_IDS = ["dating", "casual-encounters", "missed-connections", "friends"]
-LOCANTO_TAG_SLUGS = ["gay", "lesbian", "bisexual", "transgender", "queer", "lgbtq+", "straight"]
-
-# --- END: TOOLS ---
-
-# --- BEGIN: entrypoint ---
-
+            
 class AIVoiceAssistant:
     _instance = None
 
@@ -274,13 +471,10 @@ class AIVoiceAssistant:
                     azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
                     azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
                     api_version=os.environ["AZURE_OPENAI_VERSION"],
-                    temperature=1,
+                    temperature=0.7,
                     parallel_tool_calls=True,
                     tool_choice="auto",
                     timeout=httpx.Timeout(connect=15.0, read=10.0, write=5.0, pool=5.0),
-                    user="martin",
-                    organization=os.environ.get("redbuilder"),
-                    project=os.environ.get("kiki"),
                 ),
                 tts=azure.TTS(
                     speech_key=os.environ["AZURE_TTS_API_KEY"],
@@ -345,875 +539,6 @@ class AIVoiceAssistant:
             follow_redirects=True,
             headers=self.default_headers
         )
-
-    async def get_categories(self, base_url: str) -> List[LocantoCategory]:
-        """Get available categories from a Locanto page.
-
-        Args:
-            base_url: The URL to get categories from
-
-        Returns:
-            List of LocantoCategory objects
-        """
-        categories: List[LocantoCategory] = []
-        async with await self._get_client() as client:
-            try:
-                response = await client.get(base_url, headers=self._update_headers(base_url))
-                await self._update_cookies(response)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'html.parser')
-
-                # Find category links in the sidebar navigation
-                category_elements = soup.select('nav.sidebar a[href*="/c/"]')
-                for elem in category_elements:
-                    name = elem.get_text(strip=True)
-                    url = urljoin(base_url, elem['href'])
-                    count_elem = elem.find('span', class_='count')
-                    count = int(count_elem.get_text(strip=True)) if count_elem else 0
-                    
-                    categories.append({
-                        'name': name,
-                        'url': url,
-                        'count': count
-                    })
-
-            except Exception as e:
-                print(f"Error getting categories: {str(e)}")
-
-        return categories
-
-    async def get_listing_details(self, url: str) -> Dict[str, Any]:
-        """Get detailed information from a single listing page.
-
-        Args:
-            url: The URL of the listing to scrape
-
-        Returns:
-            Dictionary containing detailed listing information
-        """
-        details = {
-            'contact_info': None,
-            'poster_info': None,
-            'full_description': None
-        }
-
-        async with await self._get_client() as client:
-            try:
-                response = await client.get(url, headers=self._update_headers(url))
-                await self._update_cookies(response)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'html.parser')
-
-                # Extract full description from the ad details
-                desc_elem = soup.select_one('div.ad-content__description')
-                
-                # Get age if available
-                age_elem = soup.select_one('span.age')
-                if age_elem:
-                    details['age'] = age_elem.get_text(strip=True)
-                
-                # Get reply count
-                reply_elem = soup.select_one('span.reply-count')
-                if reply_elem:
-                    try:
-                        details['reply_count'] = int(reply_elem.get_text(strip=True))
-                    except ValueError:
-                        details['reply_count'] = 0
-                
-                # Get ad ID
-                ad_id_elem = soup.select_one('span.ad-id')
-                if ad_id_elem:
-                    details['ad_id'] = ad_id_elem.get_text(strip=True)
-                
-                # Extract full description
-                if desc_elem:
-                    details['full_description'] = desc_elem.get_text(strip=True)
-
-                # Extract contact information from the contact section
-                contact_elem = soup.select_one('div.contact-box')
-                if contact_elem:
-                    details['contact_info'] = contact_elem.get_text(strip=True)
-
-                # Extract poster information from the user section
-                poster_elem = soup.select_one('div.user-info')
-                if poster_elem:
-                    details['poster_info'] = poster_elem.get_text(strip=True)
-
-            except Exception as e:
-                print(f"Error getting listing details: {str(e)}")
-
-        return details
-
-    async def locanto_search(self, category_path: List[str] = ['personals', 'men-seeking-men'], location: str = 'western-cape', max_pages: int = 3) -> List[LocantoListing]:
-        """Search Locanto.co.za for listings in a specific category and location.
-        
-        Args:
-            category: The category to search in (default: 'personals')
-            location: The location to search in (default: 'western-cape')
-            max_pages: Maximum number of pages to scrape (default: 3)
-            
-        Returns:
-            List of LocantoListing objects containing the scraped data
-        """
-        # Construct the URL based on category path
-        category_url = '/'.join(category_path)
-        base_url = f'https://locanto.co.za/{location}/{category_url}/'
-        listings: List[LocantoListing] = []
-        
-        for page in range(1, max_pages + 1):
-            url = f'{base_url}?page={page}' if page > 1 else base_url
-            try:
-                response = await self.client.get(url, headers=self._update_headers(url))
-                await self._update_cookies(response)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'html.parser')
-                # Find all listing containers
-                listing_containers = soup.select('div.resultlist__listing')
-                
-                for container in listing_containers:
-                    try:
-                        # Extract listing details
-                        title_elem = container.select_one('h3.resultlist__title a')
-                        title = title_elem.get_text(strip=True) if title_elem else ''
-                        url = urljoin(base_url, title_elem['href']) if title_elem else ''
-                        
-                        description = ''
-                        desc_elem = container.select_one('div.resultlist__description')
-                        if desc_elem:
-                            description = desc_elem.get_text(strip=True)
-                        
-                        location = ''
-                        loc_elem = container.select_one('div.resultlist__location')
-                        if loc_elem:
-                            location = loc_elem.get_text(strip=True)
-                        
-                        price = ''
-                        price_elem = container.select_one('span.resultlist__price')
-                        if price_elem:
-                            price = price_elem.get_text(strip=True)
-                        
-                        date_posted = ''
-                        date_elem = container.select_one('time.resultlist__date')
-                        if date_elem:
-                            date_posted = date_elem.get_text(strip=True)
-                        
-                        images = []
-                        img_elems = container.select('img.resultlist__image')
-                        for img in img_elems:
-                            if 'src' in img.attrs:
-                                img_url = urljoin(base_url, img['src'])
-                                images.append(img_url)
-                        
-                        # Get detailed information for this listing
-                        details = await self.get_listing_details(url)
-
-                        listing: LocantoListing = {
-                            'title': title,
-                            'description': description,
-                            'location': location,
-                            'price': price,
-                            'date_posted': date_posted,
-                            'url': url,
-                            'images': images,
-                            'contact_info': details['contact_info'],
-                            'poster_info': details['poster_info'],
-                            'full_description': details['full_description'],
-                            'category_path': category_path,
-                            'age': details.get('age'),
-                            'reply_count': details.get('reply_count'),
-                            'ad_id': details.get('ad_id')
-                        }
-                        
-                        listings.append(listing)
-                        
-                    except Exception as e:
-                        print(f"Error processing listing: {str(e)}")
-                        continue
-                
-            except Exception as e:
-                print(f"Error fetching page {page}: {str(e)}")
-                break
-            
-            # Small delay between pages to be respectful
-            await asyncio.sleep(1)
-        
-        return listings
-
-
-    async def locanto_search_by_category(self, category_path: List[str] = ['personals', 'men-seeking-men'], location: str = 'western-cape', max_pages: int = 3) -> List[LocantoListing]:
-        """Search Locanto.co.za for listings in a specific category and location.
-        
-        Args:
-            category: The category to search in (default: 'personals')
-            location: The location to search in (default: 'western-cape')
-            max_pages: Maximum number of pages to scrape (default: 3)
-            
-        Returns:
-            List of LocantoListing objects containing the scraped data
-        """
-        # Construct the URL based on category path
-        category_url = '/'.join(category_path)
-        base_url = f'https://locanto.co.za/{location}/{category_url}/'
-        listings: List[LocantoListing] = []
-        
-        for page in range(1, max_pages + 1):
-            url = f'{base_url}?page={page}' if page > 1 else base_url
-            try:
-                response = await self.client.get(url, headers=self._update_headers(url))
-                await self._update_cookies(response)
-                response.raise_for_status()
-                soup = BeautifulSoup(response.text, 'html.parser')
-                # Find all listing containers
-                listing_containers = soup.select('div.resultlist__listing')
-                
-                for container in listing_containers:
-                    try:
-                        # Extract listing details
-                        title_elem = container.select_one('h3.resultlist__title a')
-                        title = title_elem.get_text(strip=True) if title_elem else ''
-                        url = urljoin(base_url, title_elem['href']) if title_elem else ''
-                        
-                        description = ''
-                        desc_elem = container.select_one('div.resultlist__description')
-                        if desc_elem:
-                            description = desc_elem.get_text(strip=True)
-                        
-                        location = ''
-                        loc_elem = container.select_one('div.resultlist__location')
-                        if loc_elem:
-                            location = loc_elem.get_text(strip=True)
-                        
-                        price = ''
-                        price_elem = container.select_one('span.resultlist__price')
-                        if price_elem:
-                            price = price_elem.get_text(strip=True)
-                        
-                        date_posted = ''
-                        date_elem = container.select_one('time.resultlist__date')
-                        if date_elem:
-                            date_posted = date_elem.get_text(strip=True)
-                        
-                        images = []
-                        img_elems = container.select('img.resultlist__image')
-                        for img in img_elems:
-                            if 'src' in img.attrs:
-                                img_url = urljoin(base_url, img['src'])
-                                images.append(img_url)
-                        
-                        # Get detailed information for this listing
-                        details = await self.get_listing_details(url)
-
-                        listing: LocantoListing = {
-                            'title': title,
-                            'description': description,
-                            'location': location,
-                            'price': price,
-                            'date_posted': date_posted,
-                            'url': url,
-                            'images': images,
-                            'contact_info': details['contact_info'],
-                            'poster_info': details['poster_info'],
-                            'full_description': details['full_description'],
-                            'category_path': category_path,
-                            'age': details.get('age'),
-                            'reply_count': details.get('reply_count'),
-                            'ad_id': details.get('ad_id')
-                        }
-                        
-                        listings.append(listing)
-                        
-                    except Exception as e:
-                        print(f"Error processing listing: {str(e)}")
-                        continue
-                
-            except Exception as e:
-                print(f"Error fetching page {page}: {str(e)}")
-                break
-            
-            # Small delay between pages to be respectful
-            await asyncio.sleep(1)
-        
-        return listings
-
-        # --- Web Tools ---
-    
-    @function_tool
-    async def web_search(self, context: RunContext, query: str, num_results: int = 5) -> str:
-        """Search the web for information using Google Search.
-        
-        Args:
-            context: The run context for the tool
-            query: The search query
-            num_results: Number of results to return (1-10)
-            
-        Returns:
-            str: Formatted search results with titles and URLs
-        """
-        try:
-            num_results = max(1, min(10, int(num_results)))
-            search_results = []
-            
-            for result in google_search(query, num_results=num_results):
-                title = result.split('/')[-1].replace('-', ' ').title()
-                search_results.append({
-                    'title': title,
-                    'url': result
-                })
-            
-            if not search_results:
-                return "I couldn't find any results for that query."
-            
-            response = f"Here are the top {len(search_results)} results for '{query}':\n\n"
-            for i, result in enumerate(search_results, 1):
-                response += f"{i}. {result['title']}\n   {result['url']}\n\n"
-            
-            return response.strip()
-            
-        except Exception as e:
-            logging.error(f"Web search error: {e}", exc_info=True)
-            return "I encountered an error while searching the web. Please try again later."
-    
-    @function_tool
-    async def scrape_website(self, context: RunContext, url: str, selector: str = "body", text_only: bool = True) -> str:
-        """Scrape content from a website using Playwright.
-        
-        Args:
-            context: The run context for the tool
-            url: The URL to scrape
-            selector: CSS selector to target specific elements
-            text_only: Whether to return only text content
-            
-        Returns:
-            str: Extracted content from the webpage
-        """
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context()
-                page = await context.new_page()
-                
-                # Set a reasonable timeout
-                page.set_default_timeout(30000)  # 30 seconds
-                
-                # Navigate to the page
-                response = await page.goto(url, wait_until="domcontentloaded")
-                if not response or not response.ok:
-                    return f"Failed to load {url}. Status: {response.status if response else 'No response'}"
-                
-                # Wait for the selector to be present
-                try:
-                    await page.wait_for_selector(selector, timeout=10000)
-                except Exception as e:
-                    logging.warning(f"Selector {selector} not found: {e}")
-                
-                # Extract content based on parameters
-                if text_only:
-                    content = await page.locator(selector).inner_text()
-                else:
-                    content = await page.locator(selector).inner_html()
-                
-                # Clean up
-                await browser.close()
-                
-                # Clean and truncate the content
-                content = ' '.join(content.split())
-                if len(content) > 4000:  # Limit response length
-                    content = content[:4000] + '... [content truncated]'
-                
-                return content
-                
-        except Exception as e:
-            logging.error(f"Web scraping error: {e}", exc_info=True)
-            return f"I encountered an error while scraping the website: {str(e)}"
-    
-    # --- Information Tools ---
-    
-    @function_tool
-    async def wikipedia_search(self, context: RunContext, query: str) -> str:
-        """Search for information on Wikipedia.
-        
-        Args:
-            context: The run context for the tool
-            query: The topic to look up
-            
-        Returns:
-            str: Summary of the Wikipedia article
-        """
-        try:
-            wiki_wiki = wikipediaapi.Wikipedia(
-                language='en',
-                extract_format=wikipediaapi.ExtractFormat.WIKI,
-                user_agent='AmandaAI/1.0 (your-email@example.com)'
-            )
-            
-            page = wiki_wiki.page(query)
-            if not page.exists():
-                return f"I couldn't find a Wikipedia article about '{query}'."
-            
-            # Get the first two paragraphs of the summary
-            summary = '\n\n'.join(page.summary.split('\n\n')[:2])
-            
-            return f"According to Wikipedia: {summary}\n\nRead more: {page.fullurl}"
-            
-        except Exception as e:
-            logging.error(f"Wikipedia search error: {e}", exc_info=True)
-            return "I encountered an error while searching Wikipedia."
-    
-    @function_tool
-    async def get_weather(self, context: RunContext, location: str) -> str:
-        """Get current weather information for a location.
-        
-        Args:
-            context: The run context for the tool
-            location: The city and country (e.g., 'New York, US')
-            
-        Returns:
-            str: Weather information or error message
-        """
-        try:
-            # First, get coordinates for the location
-            geolocator = Nominatim(user_agent="amanda_weather")
-            location_data = geolocator.geocode(location)
-            
-            if not location_data:
-                return f"Could not find location: {location}"
-                
-            # In a real implementation, you would call a weather API here
-            # This is a placeholder response
-            return (
-                f"Weather information for {location_data.address}:\n"
-                "Current: 22°C (72°F), Partly Cloudy\n"
-                "Humidity: 65%\n"
-                "Wind: 12 km/h\n"
-                "\nNote: This is sample data. Integrate with a weather API for real data."
-            )
-            
-        except Exception as e:
-            logging.error(f"Weather lookup error: {e}", exc_info=True)
-            return f"I couldn't get the weather for {location}. Please try again later."
-    
-    # --- Utility Tools ---
-    
-    @function_tool
-    async def calculate_math(self, context: RunContext, expression: str) -> str:
-        """Evaluate a mathematical expression.
-        
-        Args:
-            context: The run context for the tool
-            expression: The mathematical expression to evaluate
-            
-        Returns:
-            str: The result or an error message
-        """
-        try:
-            # Basic safety check
-            if not re.match(r'^[0-9+\-*/().\s^%]+$', expression):
-                return "Invalid expression. Only numbers and basic arithmetic operators are allowed."
-                
-            # Replace ^ with ** for exponentiation
-            expression = expression.replace('^', '**')
-            
-            # Evaluate in a restricted environment
-            result = eval(expression, {"__builtins__": None}, {})
-            return f"The result of {expression} is {result}."
-            
-        except Exception as e:
-            logging.error(f"Calculation error: {e}", exc_info=True)
-            return "I couldn't evaluate that expression. Please check the format and try again."
-    
-    @function_tool
-    async def get_current_time(self, context: RunContext, timezone: str = "UTC") -> str:
-        """Get the current time in the specified timezone.
-        
-        Args:
-            context: The run context for the tool
-            timezone: The timezone (e.g., 'UTC', 'America/New_York')
-            
-        Returns:
-            str: Current time in the specified timezone
-        """
-        try:
-            tz = pytz.timezone(timezone)
-            now = datetime.now(tz)
-            return f"The current time in {timezone} is {now.strftime('%Y-%m-%d %H:%M:%S %Z')}."
-        except Exception as e:
-            logging.error(f"Time lookup error: {e}", exc_info=True)
-            return f"I couldn't get the time for timezone {timezone}. Please check the timezone name and try again."
-    
-    # --- Browser Automation ---
-    
-    @function_tool
-    async def take_screenshot(self, context: RunContext, url: str, selector: str = "body") -> str:
-        """Take a screenshot of a webpage or specific element.
-        
-        Args:
-            context: The run context for the tool
-            url: The URL to capture
-            selector: CSS selector for specific element (default: whole page)
-            
-        Returns:
-            str: Path to the screenshot or error message
-        """
-        try:
-            # Create screenshots directory if it doesn't exist
-            os.makedirs('screenshots', exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            screenshot_path = f"screenshots/screenshot_{timestamp}.png"
-            
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(viewport={'width': 1280, 'height': 800})
-                page = await context.new_page()
-                
-                # Navigate to the page
-                response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                if not response or not response.ok:
-                    return f"Failed to load {url}. Status: {response.status if response else 'No response'}"
-                
-                # Wait for the page to be fully loaded
-                await page.wait_for_load_state('networkidle')
-                
-                # Wait for the selector to be present
-                try:
-                    await page.wait_for_selector(selector, state='attached', timeout=10000)
-                    # Scroll to the element to ensure it's in view
-                    element = page.locator(selector)
-                    await element.scroll_into_view_if_needed()
-                    # Add a small delay to ensure any lazy-loaded content is visible
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    logging.warning(f"Selector {selector} not found: {e}")
-                    # If specific selector not found, take full page screenshot
-                    selector = 'body'
-                    element = page.locator(selector)
-                
-                # Take screenshot with retry logic
-                max_retries = 2
-                for attempt in range(max_retries):
-                    try:
-                        await element.screenshot(
-                            path=screenshot_path,
-                            type='png',
-                            timeout=10000
-                        )
-                        break
-                    except Exception as e:
-                        if attempt == max_retries - 1:
-                            raise e
-                        await asyncio.sleep(1)
-                
-                # Clean up
-                await browser.close()
-                
-                # Verify the screenshot was created
-                if os.path.exists(screenshot_path):
-                    file_size = os.path.getsize(screenshot_path) / 1024  # Size in KB
-                    if file_size < 1:  # If file is too small, it might be empty
-                        raise Exception("Screenshot file is too small")
-                    return f"Screenshot saved as {os.path.abspath(screenshot_path)}"
-                else:
-                    raise Exception("Failed to save screenshot")
-                
-        except Exception as e:
-            logging.error(f"Screenshot error: {e}", exc_info=True)
-            return f"I couldn't take a screenshot: {str(e)}. Please try again or check the URL and selector."
-    
-    # --- Data Processing Tools ---
-    
-    @function_tool
-    async def clean_html(self, context: RunContext, html_content: str) -> str:
-        """Clean and sanitize HTML content, removing scripts and unwanted tags.
-        
-        Args:
-            context: The run context for the tool
-            html_content: The HTML content to clean
-            
-        Returns:
-            str: Cleaned HTML or text content
-        """
-        try:
-            # Create a cleaner that removes scripts, styles, etc.
-            from lxml import html
-            from lxml_html_clean import Cleaner
-            
-            cleaner = Cleaner(
-                scripts=True,
-                javascript=True,
-                style=True,
-                links=True,
-                meta=True,
-                page_structure=False,
-                safe_attrs_only=True,
-                safe_attrs=frozenset(['src', 'alt', 'href', 'title', 'width', 'height'])
-            )
-            
-            # Parse the HTML
-            doc = html.document_fromstring(html_content)
-            
-            # Clean the document
-            cleaned_doc = cleaner.clean_html(doc)
-            
-            # Convert back to string
-            result = html.tostring(cleaned_doc, encoding='unicode', pretty_print=True)
-            
-            # Remove multiple spaces and newlines
-            result = ' '.join(result.split())
-            
-            # Truncate if too long
-            if len(result) > 4000:
-                result = result[:4000] + '... [content truncated]'
-                
-            return result
-            
-        except Exception as e:
-            logging.error(f"HTML cleaning error: {e}", exc_info=True)
-            return f"I couldn't clean the HTML content: {str(e)}"
-    
-    @function_tool
-    async def extract_links(self, context: RunContext, url: str, filter_pattern: str = None) -> str:
-        """Extract all links from a webpage, optionally filtered by a pattern.
-        
-        Args:
-            context: The run context for the tool
-            url: The URL to extract links from
-            filter_pattern: Optional regex pattern to filter links
-            
-        Returns:
-            str: Formatted list of links
-        """
-        try:
-            # Fetch the page content
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, timeout=10.0, follow_redirects=True)
-                response.raise_for_status()
-                html_content = response.text
-            
-            # Parse HTML
-            soup = BeautifulSoup(html_content, 'html5lib')
-            
-            # Extract all links
-            links = []
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                text = a.get_text(strip=True) or '[No text]'
-                
-                # Make relative URLs absolute
-                if not href.startswith(('http://', 'https://', 'mailto:', 'tel:')):
-                    href = urljoin(url, href)
-                
-                # Filter if pattern is provided
-                if filter_pattern:
-                    if re.search(filter_pattern, href, re.IGNORECASE):
-                        links.append((text, href))
-                else:
-                    links.append((text, href))
-            
-            # Format the results
-            if not links:
-                return "No links found" + (f" matching pattern '{filter_pattern}'" if filter_pattern else "")
-            
-            result = f"Found {len(links)} links"
-            if filter_pattern:
-                result += f" matching pattern '{filter_pattern}'"
-            result += ":\n\n"
-            
-            for i, (text, href) in enumerate(links[:20], 1):  # Limit to 20 links
-                result += f"{i}. {text}\n   {href}\n"
-            
-            if len(links) > 20:
-                result += f"\n... and {len(links) - 20} more links not shown."
-            
-            return result
-            
-        except Exception as e:
-            logging.error(f"Link extraction error: {e}", exc_info=True)
-            return f"I couldn't extract links from the page: {str(e)}"
-    
-    # --- Integration Tools ---
-    
-    @function_tool
-    async def search_locanto(self, context: RunContext, query: str, location: str = "", category: str = "") -> str:
-        """Search Locanto listings.
-        
-        Args:
-            context: The run context for the tool
-            query: The search query
-            location: Optional location filter
-            category: Optional category filter
-            
-        Returns:
-            str: Formatted search results
-        """
-        try:
-            # Build the search URL
-            base_url = "https://www.locanto.com/search"
-            params = {
-                'q': query,
-                'button': '',
-                'submit=1': '',
-            }
-            
-            if location:
-                params['loc'] = location
-            if category:
-                params['category'] = category
-            
-            # Use the web_search tool to get results
-            search_url = f"{base_url}?{urllib.parse.urlencode(params)}"
-            return await self.scrape_website(context, search_url, ".regular-ad", text_only=True)
-            
-        except Exception as e:
-            logging.error(f"Locanto search error: {e}", exc_info=True)
-            return f"I couldn't search Locanto: {str(e)}"
-    
-    @function_tool
-    async def get_news_headlines(self, context: RunContext, topic: str = "", country: str = "us") -> str:
-        """Get the latest news headlines.
-        
-        Args:
-            context: The run context for the tool
-            topic: The topic to search for (optional)
-            country: Two-letter country code (default: us)
-            
-        Returns:
-            str: Formatted news headlines
-        """
-        try:
-            # Use Google News search
-            query = f"{topic} news" if topic else "latest news"
-            search_url = f"https://news.google.com/search?q={urllib.parse.quote_plus(query)}&hl=en-{country.upper()}&gl={country.upper()}&ceid={country.upper()}:en"
-            
-            # Scrape Google News
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                )
-                page = await context.new_page()
-                
-                # Navigate to Google News
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                
-                # Wait for articles to load
-                await page.wait_for_selector("article", timeout=10000)
-                
-                # Extract headlines and links
-                articles = await page.evaluate('''() => {
-                    const articles = [];
-                    document.querySelectorAll('article').forEach(article => {
-                        const link = article.querySelector('a[href^="./article/"]');
-                        if (link) {
-                            articles.push({
-                                title: link.textContent.trim(),
-                                url: new URL(link.href, window.location.href).href
-                            });
-                        }
-                    });
-                    return articles.slice(0, 5); // Return top 5 articles
-                }''')
-                
-                await browser.close()
-                
-                # Format the results
-                if not articles:
-                    return "No news articles found."
-                
-                result = f"Here are the latest {topic + ' ' if topic else ''}news headlines:\n\n"
-                for i, article in enumerate(articles, 1):
-                    result += f"{i}. {article['title']}\n   {article['url']}\n\n"
-                
-                return result.strip()
-                
-        except Exception as e:
-            logging.error(f"News lookup error: {e}", exc_info=True)
-            return f"I couldn't fetch the news: {str(e)}"
-    
-    @function_tool
-    async def get_current_datetime(self, context: RunContext) -> str:
-        """Get the current date and time.
-        
-        Args:
-            context: The run context for the tool
-            
-        Returns:
-            str: The current date and time
-        """
-        try:
-            now = datetime.now(pytz.utc)
-            local_tz = pytz.timezone(os.environ.get('TZ', 'UTC'))
-            local_now = now.astimezone(local_tz)
-            
-            return f"The current date and time is {local_now.strftime('%A, %B %d, %Y at %I:%M %p %Z')}."
-            
-        except Exception as e:
-            logging.error(f"Datetime error: {e}")
-            return "I couldn't get the current date and time."
-    
-    @function_tool
-    async def calculate(self, context: RunContext, expression: str) -> str:
-        """Evaluate a mathematical expression.
-        
-        Args:
-            context: The run context for the tool
-            expression: The mathematical expression to evaluate
-            
-        Returns:
-            str: The result or an error message
-        """
-        try:
-            # Basic safety check
-            if not re.match(r'^[0-9+\-*/().\s]+$', expression):
-                return "Invalid expression. Only numbers and basic arithmetic operators are allowed."
-                
-            result = eval(expression, {"__builtins__": None}, {})
-            return f"The result of {expression} is {result}."
-            
-        except Exception as e:
-            logging.error(f"Calculation error: {e}")
-            return "I couldn't evaluate that expression. Please check the format and try again."
-    
-    @function_tool
-    async def get_weather(self, context: RunContext, location: str) -> str:
-        """Get the current weather for a location.
-        
-        Args:
-            context: The run context for the tool
-            location: The location to get weather for
-            
-        Returns:
-            str: Weather information or an error message
-        """
-        try:
-            # This is a placeholder - in a real implementation, you would call a weather API
-            return f"I can't provide real-time weather data for {location} right now. Please check a weather service for the most accurate information."
-            
-        except Exception as e:
-            logging.error(f"Weather lookup error: {e}")
-            return "I encountered an error while getting the weather."
-    
-    @function_tool
-    async def get_news_headlines(self, context: RunContext, topic: str = "") -> str:
-        """Get the latest news headlines.
-        
-        Args:
-            context: The run context for the tool
-            topic: Optional topic to search for
-            
-        Returns:
-            str: News headlines or an error message
-        """
-        try:
-            # This is a placeholder - in a real implementation, you would call a news API
-            if topic:
-                return f"I can't provide real-time news about {topic} right now. Please check a news service for the latest updates."
-            return "I can't provide real-time news right now. Please check a news service for the latest updates."
-            
-        except Exception as e:
-            logging.error(f"News lookup error: {e}")
-            return "I encountered an error while getting the news."
-
-
-# --- END: TOOLS ---    
 
 # --- BEGIN: entrypoint ---
 

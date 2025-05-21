@@ -10,7 +10,9 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 # MCP package imports
 import mcp.types
 from mcp.client import session as mcp_session
+from mcp.client.session import ClientSession
 from mcp.client import sse as mcp_sse
+from mcp.client.sse import sse_client
 from mcp.types import CallToolResult, JSONRPCMessage, Tool as MCPTool
 
 # Base class for MCP servers
