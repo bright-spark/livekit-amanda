@@ -4,7 +4,6 @@ import urllib.parse
 from typing import List, Dict, Any, Optional
 
 from bs4 import BeautifulSoup
-from livekit.agents import function_tool, RunContext
 
 # Handle imports with try/except for flexibility
 try:
@@ -20,22 +19,24 @@ except ImportError:
 
 # Handle utils import with try/except
 try:
-    from utils import sanitize_for_azure, handle_tool_results
+    from agent_utils import sanitize_for_azure
 except ImportError:
     try:
-        from .utils import sanitize_for_azure, handle_tool_results
+        from .agent_utils import sanitize_for_azure
     except ImportError:
-        logging.warning("utils module not available, using fallback definitions")
-        # Fallback definitions
+        # Define a fallback function if not available
         def sanitize_for_azure(text):
             return text
-            
-        async def handle_tool_results(session, text):
-            pass
 
-@function_tool
+# Define a fallback handle_tool_results function
+try:
+    from agent_utils import handle_tool_results
+except ImportError:
+    # Define a fallback function
+    async def handle_tool_results(session, text):
+        pass
+
 async def indeed_job_search(
-    context: RunContext,
     query: str = "customer service",
     location: str = "Johannesburg, Gauteng",
     max_results: int = 5,
@@ -44,87 +45,71 @@ async def indeed_job_search(
     """Search for jobs on Indeed using Playwright-powered scraping.
     
     Args:
-        context: The run context for the tool
         query: The job search query (job title, keywords, company)
         location: The location to search for jobs
         max_results: Maximum number of results to return (default: 5)
         include_urls: Whether to include URLs in the results (default: True)
         
     Returns:
-        str: Formatted job search results or error message
+        A formatted string with job search results
     """
     logging.info(f"[TOOL] indeed_job_search called with query: {query}, location: {location}")
     
     try:
-        # Construct the search URL
-        base_url = "https://za.indeed.com/jobs"
-        params = {
-            "q": query,
-            "l": location,
-        }
-        original_url = f"{base_url}?{urllib.parse.urlencode(params)}"
+        # Build the Indeed search URL
+        base_url = "https://www.indeed.com"
+        search_url = f"{base_url}/jobs?q={urllib.parse.quote_plus(query)}&l={urllib.parse.quote_plus(location)}"
         
-        # Use the untaint.us proxy to avoid Cloudflare restrictions
-        proxy_base = "https://please.untaint.us/?url="
-        search_url = f"{proxy_base}{urllib.parse.quote_plus(original_url)}"
+        # Use puppeteer to fetch the page (handles JavaScript rendering and bypasses some anti-scraping)
+        listings = await crawl_page(search_url)
         
-        logging.info(f"[TOOL] indeed_job_search original URL: {original_url}")
-        logging.info(f"[TOOL] indeed_job_search proxied URL: {search_url}")
-        
-        # Use crawl_page to fetch the search results page
-        try:
-            listings = await crawl_page(search_url, wait_selector=".jobsearch-ResultsList", timeout=45000, extract_text=False)
-        except Exception as crawl_error:
-            logging.error(f"[TOOL] indeed_job_search crawl_page error: {crawl_error}")
-            error_msg = f"I couldn't access Indeed to search for jobs: {str(crawl_error)}"
+        if not listings or isinstance(listings, str) and "error" in listings.lower():
+            error_msg = f"Error fetching Indeed listings: {listings}"
+            logging.error(error_msg)
             error_msg = sanitize_for_azure(error_msg)
-            
-            session = getattr(context, 'session', None)
-            if session:
-                await handle_tool_results(session, error_msg)
-                return "I couldn't search for jobs on Indeed right now."
             return error_msg
         
         # Parse job listings from the HTML
         soup = BeautifulSoup(listings, "html.parser")
         jobs = []
         
-        # Try different selectors for job cards (Indeed changes their HTML structure frequently)
-        job_cards = soup.find_all('div', class_='job_seen_beacon') or \
-                   soup.find_all('div', class_='jobCard') or \
-                   soup.find_all('div', {'data-testid': 'jobCard'}) or \
-                   soup.find_all('div', class_='tapItem')
+        # Find job cards
+        job_cards = soup.select("div.job_seen_beacon")
         
-        for div in job_cards:
-            try:
-                # Try different selectors for job elements
-                title_elem = div.find('h2', class_='jobTitle') or div.find('h2') or div.find('a', {'data-testid': 'jobTitle'})
-                company_elem = div.find('span', class_='companyName') or div.find('div', class_='company')
-                location_elem = div.find('div', class_='companyLocation') or div.find('div', class_='location')
-                summary_elem = div.find('div', class_='job-snippet') or div.find('div', class_='summary')
-                link_elem = div.find('a', href=True) or title_elem if hasattr(title_elem, 'href') else None
-                salary_elem = div.find('div', class_='salary-snippet') or div.find('span', class_='salaryText')
+        if not job_cards:
+            # Try alternative selectors
+            job_cards = soup.select("div.jobsearch-ResultsList div[data-jk]")
+            
+        if not job_cards:
+            # Try another alternative
+            job_cards = soup.select("div.tapItem")
+            
+        if job_cards:
+            for card in job_cards:
+                # Extract job details
+                title_elem = card.select_one("h2.jobTitle span") or card.select_one("h2.jobTitle a") or card.select_one("h2.jobTitle")
+                company_elem = card.select_one("span.companyName") or card.select_one("div.company_location span.companyName")
+                location_elem = card.select_one("div.companyLocation") or card.select_one("div.company_location div.companyLocation")
+                salary_elem = card.select_one("div.salary-snippet-container") or card.select_one("div.metadata.salary-snippet-container")
+                summary_elem = card.select_one("div.job-snippet") or card.select_one("div.jobCardShelfContainer div.result-footer-content.job-snippet")
                 
-                # Extract text from elements
-                title = title_elem.get_text(strip=True) if title_elem else None
-                company = company_elem.get_text(strip=True) if company_elem else None
-                location_val = location_elem.get_text(strip=True) if location_elem else None
-                summary = summary_elem.get_text(strip=True) if summary_elem else None
-                salary = salary_elem.get_text(strip=True) if salary_elem else None
+                # Extract text content
+                title = title_elem.get_text(strip=True) if title_elem else ""
+                company = company_elem.get_text(strip=True) if company_elem else ""
+                location_val = location_elem.get_text(strip=True) if location_elem else ""
+                salary = salary_elem.get_text(strip=True) if salary_elem else ""
+                summary = summary_elem.get_text(strip=True) if summary_elem else ""
                 
-                # Get URL
-                url = None
-                if link_elem and 'href' in link_elem.attrs:
-                    href = link_elem['href']
-                    if href.startswith('/'):
-                        job_url = f"https://za.indeed.com{href}"
-                    elif href.startswith('http'):
-                        job_url = href
-                    else:
-                        job_url = None
+                # Extract URL
+                job_url = None
+                if include_urls:
+                    # Try to find the job URL
+                    url_elem = card.select_one("h2.jobTitle a") or card.select_one("a.jcs-JobTitle")
+                    if url_elem and url_elem.has_attr('href'):
+                        job_url = url_elem['href']
+                        if not job_url.startswith('http'):
+                            job_url = f"{base_url}{job_url}"
                         
-                    # If we have a valid job URL, create both direct and proxied versions
-                    if job_url:
                         # Store both the direct URL and the proxied URL
                         url = {
                             "direct": job_url,
@@ -136,22 +121,15 @@ async def indeed_job_search(
                         "title": title,
                         "company": company,
                         "location": location_val,
-                        "summary": summary,
                         "salary": salary,
-                        "url": url
+                        "summary": summary,
+                        "url": url if include_urls and job_url else None
                     })
-            except Exception as parse_error:
-                logging.warning(f"[TOOL] indeed_job_search parse error for job card: {parse_error}")
-                continue
         
         if not jobs:
-            no_jobs_msg = f"No jobs found for '{query}' in '{location}'. Try different search terms or location."
+            logging.warning(f"No jobs found for query: {query}, location: {location}")
+            no_jobs_msg = f"I couldn't find any jobs matching '{query}' in '{location}'. Try a different search query or location."
             no_jobs_msg = sanitize_for_azure(no_jobs_msg)
-            
-            session = getattr(context, 'session', None)
-            if session:
-                await handle_tool_results(session, no_jobs_msg)
-                return "I couldn't find any jobs matching your search criteria."
             return no_jobs_msg
         
         # Format results for output
@@ -176,34 +154,87 @@ async def indeed_job_search(
                 result += f"   Summary: {summary}\n"
                 
             if include_urls and job['url']:
-                # Use the proxied URL by default, but also include the direct URL
-                result += f"   URL (Proxied): {job['url']['proxied']}\n"
-                result += f"   URL (Direct): {job['url']['direct']}\n"
+                result += f"   URL: {job['url']['direct']}\n"
                 
             result += "\n"
-        
-        # Add a note about the total number of results
-        if len(jobs) > max_results:
-            result += f"\n{len(jobs) - max_results} more jobs found. Refine your search for more specific results."
-        
-        result = sanitize_for_azure(result)
-        
-        # Handle session output for voice responses
-        session = getattr(context, 'session', None)
-        if session:
-            await handle_tool_results(session, result)
-            return f"I found {len(jobs)} jobs matching your search. I'll read some of them to you."
-        
+            
         return result
+    except Exception as e:
+        error_msg = f"Error searching Indeed jobs: {str(e)}"
+        logging.error(error_msg)
+        logging.error(f"Stack trace: {asyncio.format_exception(type(e), e, e.__traceback__)}")
+        return error_msg
+
+async def search_indeed_jobs(
+    query: Optional[str] = None,
+    location: Optional[str] = None,
+    max_pages: int = 1,
+    use_proxy: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Search for job listings on Indeed.
+    
+    Args:
+        query: Search query string (job title, keywords, etc.)
+        location: Location to search in
+        max_pages: Maximum number of pages to scrape
+        use_proxy: Whether to use proxy for scraping
+        
+    Returns:
+        List of job listing dictionaries
+    """
+    try:
+        # Call the indeed_job_search function
+        result = await indeed_job_search(
+            query=query or "software developer",
+            location=location or "New York",
+            max_results=max_pages * 10,  # Approximate number of results per page
+            include_urls=True
+        )
+        
+        # Parse the result string into a list of dictionaries
+        listings = []
+        current_job = {}
+        
+        for line in result.split('\n'):
+            line = line.strip()
+            if not line:
+                if current_job and 'title' in current_job:
+                    listings.append(current_job)
+                    current_job = {}
+                continue
+                
+            if line[0].isdigit() and '. ' in line:
+                # This is a new job title line
+                if current_job and 'title' in current_job:
+                    listings.append(current_job)
+                
+                # Start a new job entry
+                parts = line.split('. ', 1)
+                if len(parts) > 1:
+                    title_company = parts[1].split(' at ', 1)
+                    if len(title_company) > 1:
+                        current_job = {
+                            'title': title_company[0].strip(),
+                            'company': title_company[1].strip()
+                        }
+                    else:
+                        current_job = {'title': parts[1].strip()}
+            elif line.startswith('   Location: '):
+                current_job['location'] = line.replace('   Location: ', '').strip()
+            elif line.startswith('   Salary: '):
+                current_job['salary'] = line.replace('   Salary: ', '').strip()
+            elif line.startswith('   Summary: '):
+                current_job['description'] = line.replace('   Summary: ', '').strip()
+            elif line.startswith('   URL: '):
+                current_job['url'] = line.replace('   URL: ', '').strip()
+        
+        # Add the last job if it exists
+        if current_job and 'title' in current_job:
+            listings.append(current_job)
+            
+        return listings
         
     except Exception as e:
-        logging.error(f"[TOOL] indeed_job_search exception: {e}", exc_info=True)
-        error_msg = f"Sorry, I couldn't search for jobs right now: {str(e)}"
-        error_msg = sanitize_for_azure(error_msg)
-        
-        session = getattr(context, 'session', None)
-        if session:
-            await handle_tool_results(session, error_msg)
-            return "I encountered an error while searching for jobs."
-        
-        return error_msg
+        logging.error(f"Error in search_indeed_jobs: {str(e)}")
+        return []

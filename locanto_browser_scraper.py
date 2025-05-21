@@ -67,8 +67,12 @@ except ImportError:
     PUPPETEER_AVAILABLE = False
     logging.warning("puppeteer_crawler not available. Enhanced scraping disabled.")
 
+# Import os for environment variables
+import os
+
 # Constants
-PROXY_PREFIX = "https://please.untaint.us/?url="
+# Get proxy URL from environment variable or use default
+PROXY_PREFIX = os.environ.get("PROXY_URL", "https://please.untaint.us/?url=")
 BASE_URL = "https://www.locanto.co.za"
 
 # Scraping constants
@@ -1286,8 +1290,7 @@ if __name__ == "__main__":
         except Exception as e:
             logging.error(f"[MAP] Error at {start_url}: {e}")
 
-@function_tool
-async def search_locanto_browser(context: RunContext, query: str = "dating", location: str = "Cape Town", max_pages: int = 1, tag: str = None, category: str = None, section: str = None, url: str = None) -> str:
+async def search_locanto_browser(query: str = "dating", location: str = "Cape Town", max_pages: int = 1, tag: str = None, category: str = None, section: str = None, url: str = None) -> str:
     """Search Locanto.co.za for listings by tag, category, section, generic query, or direct URL. Uses Playwright browser and proxy. Supports tag, category, section, and direct URLs."""
     try:
         scraper = LocantoBrowserScraper()

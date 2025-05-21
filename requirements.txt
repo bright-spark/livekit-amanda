@@ -1,24 +1,36 @@
+# LiveKit and MCP dependencies
 mcp
 livekit-agents>=1.0.0rc7
 livekit-plugins-openai>=1.0.0rc7
 livekit-plugins-silero>=1.0.0rc7
 livekit-plugins-azure>=1.0.0rc7
+
+# Azure Speech Services
 azure-cognitiveservices-speech
+
+# Web scraping and browser automation
 playwright
-python-dotenv
-pytz
-httpx
-requests
-wikipedia-api
-googlesearch-python
-geopy
-brotli
 beautifulsoup4
 html5lib
 lxml
-redis>=4.5.0
-uvicorn
-fastapi
-pydantic
 lxml-html-clean
+brotli
+
+# HTTP and API clients
+httpx
+requests
 aiohttp
+
+# Web framework
+fastapi
+uvicorn
+pydantic
+
+# Utilities
+python-dotenv
+pytz
+geopy
+
+# Search and information retrieval
+wikipedia-api
+googlesearch-python

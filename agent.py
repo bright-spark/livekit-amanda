@@ -16,7 +16,6 @@ from urllib.parse import quote_plus, urljoin
 import brotli
 import httpx
 import pytz
-import redis as redis_pkg
 import uvicorn
 import wikipediaapi
 
@@ -372,6 +371,13 @@ from tools import (
     calculate,
     calculate_math,
     evaluate_expression,
+    get_fun_content,
+    # Web search tools
+    web_search,
+    google_search,
+    wikipedia_search,
+    wiki_lookup,
+    fallback_web_search,
     take_screenshot,
     clean_html,
     extract_links,
@@ -472,7 +478,7 @@ class AIVoiceAssistant:
                     azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
                     api_version=os.environ["AZURE_OPENAI_VERSION"],
                     temperature=0.7,
-                    parallel_tool_calls=True,
+                    # No parallel_tool_calls to avoid errors
                     tool_choice="auto",
                     timeout=httpx.Timeout(connect=15.0, read=10.0, write=5.0, pool=5.0),
                 ),
@@ -544,19 +550,88 @@ class AIVoiceAssistant:
 
 async def entrypoint(ctx: JobContext):
     """Main entrypoint for the LiveKit agent application."""
-    mcp_server = MCPServerSse(
-        params={"url": os.environ.get("ZAPIER_MCP_URL")},
-        cache_tools_list=True,
-        name="SSE MCP Server"
-    )
-
-    agent = await MCPToolsIntegration.create_agent_with_tools(
-        agent_class=FunctionAgent,
-        mcp_servers=[mcp_server]
-    )
-
+    # Create the agent first with local tools
+    agent = FunctionAgent()
+    logging.info("Created agent with local tools")
+    
+    # Track available tool sources for user feedback
+    tool_sources = ["Local"]
+    
+    # Check if ZAPIER_MCP_URL is set and add MCP tools if available
+    zapier_mcp_url = os.environ.get("ZAPIER_MCP_URL")
+    if zapier_mcp_url and zapier_mcp_url.strip():
+        logging.info(f"Found Zapier MCP URL, attempting to connect")
+        try:
+            # Create MCP server
+            mcp_server = MCPServerSse(
+                params={"url": zapier_mcp_url},
+                cache_tools_list=True,
+                name="Zapier MCP Server"
+            )
+            
+            # Connect to the server first to validate the connection
+            await mcp_server.connect()
+            
+            # List available tools for logging purposes
+            available_tools = await mcp_server.list_tools()
+            logging.info(f"Found {len(available_tools)} tools on Zapier MCP server")
+            
+            if available_tools:
+                # Register MCP tools with the agent
+                mcp_tools = await MCPToolsIntegration.register_with_agent(
+                    agent=agent,
+                    mcp_servers=[mcp_server],
+                    convert_schemas_to_strict=True,
+                    auto_connect=False  # Already connected above
+                )
+                logging.info(f"Successfully registered {len(mcp_tools)} MCP tools from Zapier")
+                tool_sources.append("Zapier MCP")
+                
+                # Log the names of registered tools for debugging
+                tool_names = [getattr(t, '__name__', str(t)) for t in mcp_tools]
+                logging.info(f"Registered MCP tool names: {', '.join(tool_names)}")
+            else:
+                logging.warning("No tools found on the Zapier MCP server")
+        except Exception as e:
+            import traceback
+            logging.error(f"Failed to register MCP tools: {e}")
+            logging.debug(traceback.format_exc())
+    else:
+        logging.warning("No ZAPIER_MCP_URL found in environment variables. MCP tools will not be available.")
+        
+    logging.info(f"Agent initialized with tools from: {', '.join(tool_sources)}")
+    
+    # Add a note about available tool sources to the agent instructions
+    tool_sources_str = ", ".join(tool_sources)
+    
+    # Add a special instruction to the agent to prioritize web search tools
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    agent.update_instructions(f"""
+        You are Amanda, an advanced AI assistant with access to a comprehensive set of tools and capabilities.
+        Your primary goal is to be helpful, informative, and efficient in your responses.
+        
+        Today's date is {current_date}.
+        
+        IMPORTANT: When asked to search for information or look something up, ALWAYS use the web_search, 
+        google_search, or wikipedia_search tools. These are the most reliable tools for finding information.
+        
+        You have access to tools from the following sources: {tool_sources_str}
+        
+        Available tools include:
+        - Web search tools (web_search, google_search, wikipedia_search, wiki_lookup)
+        - Time and date tools (get_current_time, get_current_date)
+        - Weather and news tools (get_weather, get_news)
+        - Math calculation tools (calculate, calculate_math, evaluate_expression)
+        - Web tools (take_screenshot, clean_html, extract_links, open_website)
+        - Fun content (get_fun_content)
+        - Job search tools (indeed_job_search, search_locanto)
+        - External tools (if Zapier MCP is available)
+    """)
+    
+    logging.info("Updated agent instructions to prioritize web search tools")
+    
     await ctx.connect()
-
+    
     session = AgentSession()
     await session.start(agent=agent, room=ctx.room)
 
