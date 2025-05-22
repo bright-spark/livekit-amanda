@@ -34,6 +34,13 @@ import PyPDF2
 import docx
 import pandas as pd
 
+# Import libraries for real-time file monitoring
+import threading
+import watchdog.observers
+import watchdog.events
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
 # Import our no-API-key search implementations
 try:
     from brave_search_nokey import web_search as brave_search
@@ -140,6 +147,7 @@ _vector_db = []
 # Data directory configuration
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 ENABLE_LOCAL_DATA = os.environ.get("ENABLE_LOCAL_DATA", "true").lower() in ("true", "1", "yes")
+ENABLE_REALTIME_MONITORING = os.environ.get("ENABLE_REALTIME_MONITORING", "true").lower() in ("true", "1", "yes")
 VECTOR_CACHE_PATH = os.path.join(DATA_DIR, "vector_cache.pkl")
 
 def _get_cache_key(query: str, **kwargs) -> str:
@@ -362,12 +370,15 @@ def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
         logger.error(f"Error calculating cosine similarity: {e}")
         return 0.0
 
-async def add_to_rag_cache(query: str, search_results: str) -> None:
+async def add_to_rag_cache(query: str, search_results: str) -> Optional[str]:
     """Add search results to the RAG cache.
     
     Args:
         query: The search query
         search_results: The search results
+        
+    Returns:
+        ID of the added entry, or None if not added
     """
     if not ENABLE_RAG or not AZURE_OPENAI_API_KEY:
         return
@@ -382,13 +393,16 @@ async def add_to_rag_cache(query: str, search_results: str) -> None:
         query_embedding = await _get_embedding(query)
         results_embedding = await _get_embedding(search_results)
         
-        # Create entry
+        # Create entry with unique ID
+        entry_id = hashlib.md5(f"{query}:{time.time()}".encode()).hexdigest()
         entry = {
+            "id": entry_id,
             "query": query,
             "results": search_results,
             "query_embedding": query_embedding,
             "results_embedding": results_embedding,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "is_valid": True
         }
         
         # Add to vector DB
@@ -403,9 +417,91 @@ async def add_to_rag_cache(query: str, search_results: str) -> None:
         # Save to disk
         _save_vector_db()
         
-        logger.info(f"Added search results for '{query}' to RAG cache")
+        logger.info(f"Added search results for '{query}' to RAG cache with ID: {entry_id}")
+        return entry_id
     except Exception as e:
         logger.error(f"Error adding to RAG cache: {e}")
+
+async def invalidate_rag_entry(entry_id: str) -> bool:
+    """Invalidate a specific entry in the RAG cache by its ID.
+    
+    Args:
+        entry_id: The ID of the entry to invalidate
+        
+    Returns:
+        True if the entry was found and invalidated, False otherwise
+    """
+    if not ENABLE_RAG:
+        return False
+    
+    try:
+        global _vector_db
+        # Load vector DB if not loaded
+        if not _vector_db:
+            _load_vector_db()
+        
+        # Find the entry by ID
+        for i, entry in enumerate(_vector_db):
+            if str(entry.get("id", "")) == entry_id:
+                # Remove the entry
+                _vector_db.pop(i)
+                # Save the updated DB
+                _save_vector_db()
+                logger.info(f"Invalidated RAG entry with ID: {entry_id}")
+                return True
+        
+        logger.warning(f"RAG entry with ID: {entry_id} not found")
+        return False
+    except Exception as e:
+        logger.error(f"Error invalidating RAG entry: {e}")
+        return False
+
+async def invalidate_rag_entries_by_query(query: str, similarity_threshold: float = 0.9) -> int:
+    """Invalidate entries in the RAG cache that match the given query with high similarity.
+    
+    Args:
+        query: The query to match against
+        similarity_threshold: Minimum similarity threshold (0-1)
+        
+    Returns:
+        Number of entries invalidated
+    """
+    if not ENABLE_RAG or not AZURE_OPENAI_API_KEY:
+        return 0
+    
+    try:
+        global _vector_db
+        # Load vector DB if not loaded
+        if not _vector_db:
+            _load_vector_db()
+        
+        if not _vector_db:
+            return 0
+        
+        # Get query embedding
+        query_embedding = await _get_embedding(query)
+        
+        # Find entries with high similarity
+        entries_to_remove = []
+        for i, entry in enumerate(_vector_db):
+            # Calculate similarity with query embedding
+            query_similarity = _cosine_similarity(query_embedding, entry.get("query_embedding", []))
+            if query_similarity >= similarity_threshold:
+                entries_to_remove.append(i)
+        
+        # Remove entries in reverse order to avoid index issues
+        for i in sorted(entries_to_remove, reverse=True):
+            _vector_db.pop(i)
+        
+        # Save the updated DB if any entries were removed
+        if entries_to_remove:
+            _save_vector_db()
+            logger.info(f"Invalidated {len(entries_to_remove)} RAG entries matching query: '{query}'")
+        
+        return len(entries_to_remove)
+    except Exception as e:
+        logger.error(f"Error invalidating RAG entries by query: {e}")
+        return 0
 
 async def retrieve_from_rag_cache(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
     """Retrieve relevant entries from the RAG cache.
@@ -866,6 +962,117 @@ async def enhanced_search(
             return await bing_search(query, num_results)
         return f"Error performing search for '{query}': {str(e)}"
 
+class DataFileHandler(FileSystemEventHandler):
+    """Handler for file system events in the data directory."""
+    
+    def __init__(self, data_manager):
+        self.data_manager = data_manager
+        self.processing_lock = threading.Lock()
+        self.pending_files = set()
+        self.processing_timer = None
+    
+    def on_created(self, event):
+        """Handle file creation event."""
+        if not event.is_directory:
+            self._schedule_processing(event.src_path)
+    
+    def on_modified(self, event):
+        """Handle file modification event."""
+        if not event.is_directory:
+            self._schedule_processing(event.src_path)
+    
+    def on_moved(self, event):
+        """Handle file move event."""
+        if not event.is_directory:
+            # Remove old file if it was in our data
+            if event.src_path in self.data_manager.data_files:
+                with self.processing_lock:
+                    file_id = os.path.relpath(event.src_path, DATA_DIR)
+                    if file_id in self.data_manager.data_files:
+                        del self.data_manager.data_files[file_id]
+                    if file_id in self.data_manager.embeddings:
+                        del self.data_manager.embeddings[file_id]
+            # Process the new file
+            self._schedule_processing(event.dest_path)
+    
+    def on_deleted(self, event):
+        """Handle file deletion event."""
+        if not event.is_directory:
+            with self.processing_lock:
+                file_id = os.path.relpath(event.src_path, DATA_DIR)
+                if file_id in self.data_manager.data_files:
+                    del self.data_manager.data_files[file_id]
+                if file_id in self.data_manager.embeddings:
+                    del self.data_manager.embeddings[file_id]
+                logger.info(f"Removed deleted file from index: {file_id}")
+                # Save the updated cache
+                self.data_manager._save_vector_cache()
+    
+    def _schedule_processing(self, file_path):
+        """Schedule file processing with debouncing."""
+        if not file_path.startswith(DATA_DIR):
+            return
+            
+        with self.processing_lock:
+            self.pending_files.add(file_path)
+            
+            # Cancel existing timer if any
+            if self.processing_timer:
+                self.processing_timer.cancel()
+            
+            # Schedule processing after a short delay to debounce multiple events
+            self.processing_timer = threading.Timer(2.0, self._process_pending_files)
+            self.processing_timer.daemon = True
+            self.processing_timer.start()
+    
+    def _process_pending_files(self):
+        """Process all pending files."""
+        files_to_process = set()
+        
+        with self.processing_lock:
+            files_to_process = self.pending_files.copy()
+            self.pending_files.clear()
+            self.processing_timer = None
+        
+        if files_to_process:
+            logger.info(f"Processing {len(files_to_process)} new or modified files")
+            for file_path in files_to_process:
+                try:
+                    self.data_manager.process_file(file_path)
+                except Exception as e:
+                    logger.error(f"Error processing file {file_path}: {e}")
+            
+            # Save the updated cache
+            self.data_manager._save_vector_cache()
+
+async def invalidate_local_data(file_id: str) -> bool:
+    """Invalidate a specific document in the local data store.
+    
+    Args:
+        file_id: The ID (relative path) of the document to invalidate
+        
+    Returns:
+        True if the document was found and invalidated, False otherwise
+    """
+    if not ENABLE_LOCAL_DATA:
+        return False
+    
+    try:
+        # Remove from data_manager if it exists
+        if file_id in data_manager.data_files:
+            del data_manager.data_files[file_id]
+            if file_id in data_manager.embeddings:
+                del data_manager.embeddings[file_id]
+            data_manager._save_vector_cache()
+            logger.info(f"Invalidated local document: {file_id}")
+            return True
+        else:
+            logger.warning(f"Local document not found: {file_id}")
+            return False
+    except Exception as e:
+        logger.error(f"Error invalidating local document: {e}")
+        return False
+
 class DataManager:
     """Manages loading, processing, and retrieving data from the data directory."""
     
@@ -873,8 +1080,13 @@ class DataManager:
         self.data_files = {}
         self.embeddings = {}
         self.embedding_client = None
+        self.file_observer = None
         self.initialize_embedding_client()
         self.load_data_directory()
+        
+        # Start real-time file monitoring if enabled
+        if ENABLE_LOCAL_DATA and ENABLE_REALTIME_MONITORING:
+            self.start_file_monitoring()
     
     def initialize_embedding_client(self):
         """Initialize the Azure OpenAI embedding client."""
@@ -891,15 +1103,85 @@ class DataManager:
         else:
             logger.warning("Azure OpenAI embedding credentials not provided")
     
+    def start_file_monitoring(self):
+        """Start real-time monitoring of the data directory."""
+        if self.file_observer:
+            # Already monitoring
+            return
+            
+        try:
+            # Create data directory if it doesn't exist
+            os.makedirs(DATA_DIR, exist_ok=True)
+            
+            # Set up the file system event handler
+            event_handler = DataFileHandler(self)
+            self.file_observer = Observer()
+            self.file_observer.schedule(event_handler, DATA_DIR, recursive=True)
+            self.file_observer.start()
+            
+            logger.info(f"Started real-time monitoring of data directory: {DATA_DIR}")
+        except Exception as e:
+            logger.error(f"Failed to start file monitoring: {e}")
+    
+    def stop_file_monitoring(self):
+        """Stop real-time monitoring of the data directory."""
+        if self.file_observer:
+            try:
+                self.file_observer.stop()
+                self.file_observer.join()
+                self.file_observer = None
+                logger.info("Stopped real-time monitoring of data directory")
+            except Exception as e:
+                logger.error(f"Error stopping file monitoring: {e}")
+    
+    def process_file(self, file_path):
+        """Process a single file and update the index."""
+        try:
+            path_obj = Path(file_path)
+            relative_path = str(path_obj.relative_to(DATA_DIR))
+            
+            # Skip the vector cache file itself
+            if relative_path == os.path.basename(VECTOR_CACHE_PATH):
+                return
+                
+            content = self._load_file_content(path_obj)
+            if content:
+                self.data_files[relative_path] = {
+                    'content': content,
+                    'path': str(file_path),
+                    'type': path_obj.suffix,
+                    'last_modified': os.path.getmtime(file_path)
+                }
+                
+                # Generate embedding for this file
+                if len(content) > 8000:
+                    chunks = self._chunk_text(content)
+                    embeddings = []
+                    for chunk in chunks:
+                        embedding = self._get_embedding(chunk)
+                        if embedding:
+                            embeddings.append(embedding)
+                    if embeddings:
+                        self.embeddings[relative_path] = np.mean(embeddings, axis=0)
+                else:
+                    embedding = self._get_embedding(content)
+                    if embedding is not None:
+                        self.embeddings[relative_path] = embedding
+                        
+                logger.info(f"Processed file: {relative_path}")
+                return True
+        except Exception as e:
+            logger.error(f"Error processing file {file_path}: {e}")
+        return False
+    
     def load_data_directory(self):
         """Load all data files from the data directory."""
         if not ENABLE_LOCAL_DATA:
             logger.info("Local data usage is disabled")
             return
             
-        if not os.path.exists(DATA_DIR):
-            logger.warning(f"Data directory not found: {DATA_DIR}")
-            return
+        # Create data directory if it doesn't exist
+        os.makedirs(DATA_DIR, exist_ok=True)
             
         # Try to load cached vectors first
         if os.path.exists(VECTOR_CACHE_PATH):
@@ -909,6 +1191,30 @@ class DataManager:
                     self.data_files = cache.get('data_files', {})
                     self.embeddings = cache.get('embeddings', {})
                     logger.info(f"Loaded {len(self.data_files)} documents from vector cache")
+                    
+                    # Verify files still exist and haven't changed
+                    files_to_remove = []
+                    for file_id, file_data in self.data_files.items():
+                        file_path = file_data.get('path')
+                        if not os.path.exists(file_path):
+                            files_to_remove.append(file_id)
+                        elif 'last_modified' in file_data:
+                            # Check if file has been modified since last cached
+                            current_mtime = os.path.getmtime(file_path)
+                            if current_mtime > file_data['last_modified']:
+                                files_to_remove.append(file_id)
+                    
+                    # Remove stale entries
+                    for file_id in files_to_remove:
+                        del self.data_files[file_id]
+                        if file_id in self.embeddings:
+                            del self.embeddings[file_id]
+                    
+                    if files_to_remove:
+                        logger.info(f"Removed {len(files_to_remove)} stale entries from cache")
+                    
+                    # Only scan for new files if we had a valid cache
+                    self._scan_for_new_files()
                     return
             except Exception as e:
                 logger.warning(f"Failed to load vector cache: {e}")
@@ -916,25 +1222,26 @@ class DataManager:
         # Load all files from data directory
         for file_path in Path(DATA_DIR).rglob('*'):
             if file_path.is_file():
-                try:
-                    relative_path = str(file_path.relative_to(DATA_DIR))
-                    content = self._load_file_content(file_path)
-                    if content:
-                        self.data_files[relative_path] = {
-                            'content': content,
-                            'path': str(file_path),
-                            'type': file_path.suffix
-                        }
-                except Exception as e:
-                    logger.error(f"Error loading file {file_path}: {e}")
+                self.process_file(str(file_path))
         
         logger.info(f"Loaded {len(self.data_files)} documents from data directory")
         
-        # Generate embeddings for all documents
-        self._generate_embeddings()
-        
         # Cache the vectors
         self._save_vector_cache()
+    
+    def _scan_for_new_files(self):
+        """Scan for new files that aren't in the cache yet."""
+        new_files_count = 0
+        for file_path in Path(DATA_DIR).rglob('*'):
+            if file_path.is_file():
+                relative_path = str(file_path.relative_to(DATA_DIR))
+                if relative_path not in self.data_files:
+                    if self.process_file(str(file_path)):
+                        new_files_count += 1
+        
+        if new_files_count > 0:
+            logger.info(f"Added {new_files_count} new files to the index")
+            self._save_vector_cache()
     
     def _load_file_content(self, file_path: Path) -> Optional[str]:
         """Load content from a file based on its type."""
@@ -1100,6 +1407,42 @@ class DataManager:
 # Initialize the data manager
 data_manager = DataManager()
 
+# Function to invalidate entries in the Brave Search persistent cache
+async def invalidate_brave_search_cache(query: str = None, url: str = None) -> bool:
+    """Invalidate entries in the Brave Search persistent cache.
+    
+    Args:
+        query: Optional query to invalidate (all entries matching this query)
+        url: Optional URL to invalidate (all entries containing this URL)
+        
+    Returns:
+        True if any entries were invalidated, False otherwise
+    """
+    try:
+        # Import the Brave Search cache module
+        from brave_search_cache import invalidate_cache_entry, invalidate_cache_by_query, invalidate_cache_by_url
+        
+        if query and url:
+            # Invalidate by both query and URL
+            result1 = await invalidate_cache_by_query(query)
+            result2 = await invalidate_cache_by_url(url)
+            return result1 or result2
+        elif query:
+            # Invalidate by query
+            return await invalidate_cache_by_query(query)
+        elif url:
+            # Invalidate by URL
+            return await invalidate_cache_by_url(url)
+        else:
+            logger.warning("No query or URL provided for cache invalidation")
+            return False
+    except ImportError:
+        logger.error("Brave Search cache module not available")
+        return False
+    except Exception as e:
+        logger.error(f"Error invalidating Brave Search cache: {e}")
+        return False
+
 async def enhanced_search_with_local_data(query: str, conversation_history: Optional[List[Dict[str, str]]] = None, 
                                          max_results: int = 10) -> Dict[str, Any]:
     """
@@ -1204,14 +1547,31 @@ def _init_module():
     if ENABLE_RAG:
         _load_vector_db()
 
+# Cleanup function to stop file monitoring when the module is unloaded
+def _cleanup_module():
+    """Clean up resources when the module is unloaded."""
+    if hasattr(data_manager, 'stop_file_monitoring'):
+        data_manager.stop_file_monitoring()
+
+# Register cleanup handler for graceful shutdown
+import atexit
+atexit.register(_cleanup_module)
+
 # For testing
 if __name__ == "__main__":
     # Initialize the module
     _init_module()
     
     async def test_search():
-        result = await enhanced_search("latest developments in quantum computing", 5)
-        print(result)
+        # Test the enhanced search with local data
+        result = await search_with_local_data("latest developments in quantum computing", max_results=5)
+        print("Search results:")
+        print(f"Query: {result['query']}")
+        print(f"Reformulated query: {result['reformulated_query']}")
+        print(f"Sources: {result['sources']}")
+        print(f"Summary: {result['summary']}")
+        print(f"Web results: {len(result['web_results'])}")
+        print(f"Local results: {len(result['local_results'])}")
     
     asyncio.run(test_search())
 else:

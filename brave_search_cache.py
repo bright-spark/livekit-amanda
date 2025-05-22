@@ -508,3 +508,128 @@ async def close_brave_search_cache() -> None:
     if _brave_search_cache is not None:
         await _brave_search_cache.close()
         _brave_search_cache = None
+
+async def invalidate_cache_entry(key: str) -> bool:
+    """Invalidate a specific cache entry by its key.
+    
+    Args:
+        key: The cache key to invalidate
+        
+    Returns:
+        True if the entry was found and invalidated, False otherwise
+    """
+    cache = get_brave_search_cache()
+    
+    # Try to invalidate in both web and AI caches
+    web_result = await cache.web_cache_manager.invalidate(key)
+    ai_result = await cache.ai_cache_manager.invalidate(key)
+    
+    if web_result or ai_result:
+        logger.info(f"Invalidated cache entry with key: {key}")
+        return True
+    else:
+        logger.warning(f"Cache entry with key: {key} not found")
+        return False
+
+async def invalidate_cache_by_query(query: str) -> bool:
+    """Invalidate all cache entries that match a query.
+    
+    This uses a fuzzy matching approach to find and invalidate all entries
+    that might be related to the given query.
+    
+    Args:
+        query: The query to match against
+        
+    Returns:
+        True if any entries were invalidated, False otherwise
+    """
+    cache = get_brave_search_cache()
+    query = query.lower().strip()
+    
+    # Get all keys from both caches
+    web_keys = await cache.web_cache_manager.get_all_keys()
+    ai_keys = await cache.ai_cache_manager.get_all_keys()
+    
+    # Find keys that contain the query
+    web_matches = [k for k in web_keys if query in k.lower()]
+    ai_matches = [k for k in ai_keys if query in k.lower()]
+    
+    # Invalidate matching entries
+    invalidated = False
+    
+    for key in web_matches:
+        if await cache.web_cache_manager.invalidate(key):
+            invalidated = True
+            logger.info(f"Invalidated web cache entry with key: {key}")
+    
+    for key in ai_matches:
+        if await cache.ai_cache_manager.invalidate(key):
+            invalidated = True
+            logger.info(f"Invalidated AI cache entry with key: {key}")
+    
+    if invalidated:
+        logger.info(f"Invalidated {len(web_matches) + len(ai_matches)} cache entries matching query: '{query}'")
+    else:
+        logger.warning(f"No cache entries found matching query: '{query}'")
+    
+    return invalidated
+
+async def invalidate_cache_by_url(url: str) -> bool:
+    """Invalidate all cache entries that contain a specific URL.
+    
+    Args:
+        url: The URL to match against
+        
+    Returns:
+        True if any entries were invalidated, False otherwise
+    """
+    cache = get_brave_search_cache()
+    url = url.lower().strip()
+    
+    # Get all entries from both caches
+    web_entries = await cache.web_cache_manager.get_all_entries()
+    ai_entries = await cache.ai_cache_manager.get_all_entries()
+    
+    # Find entries that contain the URL in their value
+    web_matches = []
+    ai_matches = []
+    
+    for key, entry in web_entries.items():
+        value = entry.get('value', '')
+        if isinstance(value, dict) or isinstance(value, list):
+            value_str = json.dumps(value).lower()
+        else:
+            value_str = str(value).lower()
+        
+        if url in value_str:
+            web_matches.append(key)
+    
+    for key, entry in ai_entries.items():
+        value = entry.get('value', '')
+        if isinstance(value, dict) or isinstance(value, list):
+            value_str = json.dumps(value).lower()
+        else:
+            value_str = str(value).lower()
+        
+        if url in value_str:
+            ai_matches.append(key)
+    
+    # Invalidate matching entries
+    invalidated = False
+    
+    for key in web_matches:
+        if await cache.web_cache_manager.invalidate(key):
+            invalidated = True
+            logger.info(f"Invalidated web cache entry containing URL '{url}' with key: {key}")
+    
+    for key in ai_matches:
+        if await cache.ai_cache_manager.invalidate(key):
+            invalidated = True
+            logger.info(f"Invalidated AI cache entry containing URL '{url}' with key: {key}")
+    
+    if invalidated:
+        logger.info(f"Invalidated {len(web_matches) + len(ai_matches)} cache entries containing URL: '{url}'")
+    else:
+        logger.warning(f"No cache entries found containing URL: '{url}'")
+    
+    return invalidated
