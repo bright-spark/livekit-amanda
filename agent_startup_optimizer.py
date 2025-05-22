@@ -156,14 +156,14 @@ class AgentStartupOptimizer:
                 tz = pytz.timezone(timezone)
                 
                 # Get the current time in the specified timezone
-                current_time = datetime.now(tz)
+                now = datetime.now(tz)
                 
                 # Format the time
-                formatted_time = current_time.strftime("%H:%M:%S %Z%z")
+                formatted_time = now.strftime("%Y-%m-%d %H:%M:%S %Z%z")
                 
                 return f"The current time in {timezone} is {formatted_time}"
             except Exception as e:
-                return f"Error getting current time: {str(e)}"
+                return f"Error getting time: {str(e)}"
         
         @function_tool
         async def get_current_date(context: RunContext, timezone: str = "UTC") -> str:
@@ -187,10 +187,26 @@ class AgentStartupOptimizer:
         
         # Register the tools with the agent
         self.time_date_tools = [get_current_time, get_current_date]
-        for tool in self.time_date_tools:
-            await self.agent.add_tool(tool)
         
-        logger.info(f"Registered {len(self.time_date_tools)} time and date tools")
+        # Register tools with the agent using the proper update_tools method
+        try:
+            # Get current tools
+            current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+            
+            # Add our new tools
+            all_tools = list(current_tools) + self.time_date_tools
+            
+            # Update the agent's tools
+            await self.agent.update_tools(all_tools)
+            
+            tool_names = [tool.__name__ for tool in self.time_date_tools]
+            logger.info(f"Added time and date tools to agent: {', '.join(tool_names)}")
+            
+            # Update agent instructions with specific tool names
+            await self.update_agent_instructions(f"Basic tools loaded: {', '.join(tool_names)}")
+        except Exception as e:
+            logger.error(f"Error adding time and date tools: {e}")
+            logger.warning("Could not add time and date tools to agent")
         
     async def load_search_tools(self):
         """
@@ -218,7 +234,11 @@ class AgentStartupOptimizer:
         await self.register_web_search()
         
         # Update instructions to reflect search tools
-        await self.update_agent_instructions("Search tools loaded")
+        tool_names = [tool.__name__ for tool in self.web_search_tools]
+        if tool_names:
+            await self.update_agent_instructions(f"Search tools loaded: {', '.join(tool_names)}")
+        else:
+            await self.update_agent_instructions("No search tools were loaded")
         
         # Mark search tools as loaded
         self.search_tools_loaded = True
@@ -242,8 +262,24 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching with Brave: {str(e)}"
             
-            # Register the tool with the agent
-            await self.agent.add_tool(brave_search)
+            # Register the tool with the agent using the proper update_tools method
+            try:
+                # Get current tools
+                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                
+                # Add our new tool
+                all_tools = list(current_tools) + [brave_search]
+                
+                # Update the agent's tools
+                await self.agent.update_tools(all_tools)
+                
+                logger.info("Added Brave Search tool to agent")
+                # Notify console
+                await self.update_agent_instructions(f"Tool added: brave_search - Search the web using Brave Search API specifically")
+            except Exception as e:
+                logger.error(f"Error adding Brave Search tool: {e}")
+                logger.warning("Could not add Brave Search tool to agent")
+            
             self.web_search_tools.append(brave_search)
             
             logger.info("Registered Brave Search tool")
@@ -265,8 +301,24 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching with Bing: {str(e)}"
             
-            # Register the tool with the agent
-            await self.agent.add_tool(bing_search)
+            # Register the tool with the agent using the proper update_tools method
+            try:
+                # Get current tools
+                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                
+                # Add our new tool
+                all_tools = list(current_tools) + [bing_search]
+                
+                # Update the agent's tools
+                await self.agent.update_tools(all_tools)
+                
+                logger.info("Added Bing Search tool to agent")
+                # Notify console
+                await self.update_agent_instructions(f"Tool added: bing_search - Search the web using Bing specifically")
+            except Exception as e:
+                logger.error(f"Error adding Bing Search tool: {e}")
+                logger.warning("Could not add Bing Search tool to agent")
+            
             self.web_search_tools.append(bing_search)
             
             logger.info("Registered Bing Search tool")
@@ -288,8 +340,24 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching with DuckDuckGo: {str(e)}"
             
-            # Register the tool with the agent
-            await self.agent.add_tool(duckduckgo_search)
+            # Register the tool with the agent using the proper update_tools method
+            try:
+                # Get current tools
+                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                
+                # Add our new tool
+                all_tools = list(current_tools) + [duckduckgo_search]
+                
+                # Update the agent's tools
+                await self.agent.update_tools(all_tools)
+                
+                logger.info("Added DuckDuckGo Search tool to agent")
+                # Notify console
+                await self.update_agent_instructions(f"Tool added: duckduckgo_search - Search the web using DuckDuckGo specifically")
+            except Exception as e:
+                logger.error(f"Error adding DuckDuckGo Search tool: {e}")
+                logger.warning("Could not add DuckDuckGo Search tool to agent")
+            
             self.web_search_tools.append(duckduckgo_search)
             
             logger.info("Registered DuckDuckGo Search tool")
@@ -311,8 +379,24 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching with Google: {str(e)}"
             
-            # Register the tool with the agent
-            await self.agent.add_tool(google_search)
+            # Register the tool with the agent using the proper update_tools method
+            try:
+                # Get current tools
+                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                
+                # Add our new tool
+                all_tools = list(current_tools) + [google_search]
+                
+                # Update the agent's tools
+                await self.agent.update_tools(all_tools)
+                
+                logger.info("Added Google Search tool to agent")
+                # Notify console
+                await self.update_agent_instructions(f"Tool added: google_search - Search the web using Google specifically")
+            except Exception as e:
+                logger.error(f"Error adding Google Search tool: {e}")
+                logger.warning("Could not add Google Search tool to agent")
+            
             self.web_search_tools.append(google_search)
             
             logger.info("Registered Google Search tool")
@@ -341,8 +425,24 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching Wikipedia: {str(e)}"
             
-            # Register the tool with the agent
-            await self.agent.add_tool(wikipedia_search)
+            # Register the tool with the agent using the proper update_tools method
+            try:
+                # Get current tools
+                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                
+                # Add our new tool
+                all_tools = list(current_tools) + [wikipedia_search]
+                
+                # Update the agent's tools
+                await self.agent.update_tools(all_tools)
+                
+                logger.info("Added Wikipedia Search tool to agent")
+                # Notify console
+                await self.update_agent_instructions(f"Tool added: wikipedia_search - Search Wikipedia for information on a topic")
+            except Exception as e:
+                logger.error(f"Error adding Wikipedia Search tool: {e}")
+                logger.warning("Could not add Wikipedia Search tool to agent")
+            
             self.web_search_tools.append(wikipedia_search)
             
             logger.info("Registered Wikipedia Search tool")
@@ -390,12 +490,28 @@ class AgentStartupOptimizer:
             # Fallback to a simple message if no search engines are available
             return "No search engines are currently available. Please try again later."
         
-        # Register the tool with the agent
-        await self.agent.add_tool(web_search)
+        # Register the tool with the agent using the proper update_tools method
+        try:
+            # Get current tools
+            current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+            
+            # Add our new tool
+            all_tools = list(current_tools) + [web_search]
+            
+            # Update the agent's tools
+            await self.agent.update_tools(all_tools)
+            
+            logger.info("Added Web Search tool to agent")
+            # Notify console
+            await self.update_agent_instructions(f"Tool added: web_search - Search the web using the best available search engine")
+        except Exception as e:
+            logger.error(f"Error adding Web Search tool: {e}")
+            logger.warning("Could not add Web Search tool to agent")
+        
         self.web_search_tools.append(web_search)
         
         logger.info("Registered combined web_search tool")
-        
+    
     async def load_job_search_tools(self):
         """Load job search tools if enabled."""
         logger.info("Loading job search tools")
@@ -407,9 +523,14 @@ class AgentStartupOptimizer:
             await self.register_locanto_search()
         
         # Update instructions to reflect job search tools
-        await self.update_agent_instructions("Job search tools loaded")
+        tool_names = [tool.__name__ for tool in self.job_search_tools]
+        if tool_names:
+            await self.update_agent_instructions(f"Job search tools loaded: {', '.join(tool_names)}")
+        else:
+            await self.update_agent_instructions("No job search tools were loaded")
         
         # Mark job search tools as loaded
+        self.job_search_tools_loaded = True
         self.tool_sources.append("Job Search Tools")
         
         # Load enhanced search next if enabled
@@ -438,8 +559,24 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching Indeed: {str(e)}"
             
-            # Register the tool with the agent
-            await self.agent.add_tool(indeed_job_search)
+            # Register the tool with the agent using the proper update_tools method
+            try:
+                # Get current tools
+                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                
+                # Add our new tool
+                all_tools = list(current_tools) + [indeed_job_search]
+                
+                # Update the agent's tools
+                await self.agent.update_tools(all_tools)
+                
+                logger.info("Added Indeed Job Search tool to agent")
+                # Notify console
+                await self.update_agent_instructions(f"Tool added: indeed_job_search - Search for jobs on Indeed")
+            except Exception as e:
+                logger.error(f"Error adding Indeed Job Search tool: {e}")
+                logger.warning("Could not add Indeed Job Search tool to agent")
+            
             self.job_search_tools.append(indeed_job_search)
             
             logger.info("Registered Indeed job search tool")
@@ -461,8 +598,24 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching Locanto: {str(e)}"
             
-            # Register the tool with the agent
-            await self.agent.add_tool(search_locanto)
+            # Register the tool with the agent using the proper update_tools method
+            try:
+                # Get current tools
+                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                
+                # Add our new tool
+                all_tools = list(current_tools) + [search_locanto]
+                
+                # Update the agent's tools
+                await self.agent.update_tools(all_tools)
+                
+                logger.info("Added Locanto Search tool to agent")
+                # Notify console
+                await self.update_agent_instructions(f"Tool added: search_locanto - Search for listings on Locanto")
+            except Exception as e:
+                logger.error(f"Error adding Locanto Search tool: {e}")
+                logger.warning("Could not add Locanto Search tool to agent")
+            
             self.job_search_tools.append(search_locanto)
             
             logger.info("Registered Locanto search tool")
@@ -488,7 +641,10 @@ class AgentStartupOptimizer:
                 self.background_embedding_started = True
             
             # Update instructions to reflect enhanced search
-            await self.update_agent_instructions("Enhanced search with RAG loaded")
+            if self.has_enhanced_search:
+                await self.update_agent_instructions("Enhanced search with RAG loaded: You can now search through local knowledge base")
+            else:
+                await self.update_agent_instructions("Enhanced search with RAG is not enabled")
             
             # Mark enhanced search as loaded
             self.enhanced_search_loaded = True
@@ -566,13 +722,23 @@ class AgentStartupOptimizer:
         # Finalize the agent configuration
         await self.finalize_agent_configuration()
         
-    async def update_agent_instructions(self, update_message: str = ""):
+    async def update_agent_instructions(self, status_message):
         """
-        Update the agent's instructions based on currently loaded tools.
+        Update the agent's instructions to reflect current capabilities.
         
         Args:
-            update_message: Optional message about what was just updated
+            status_message: A message indicating what has been loaded
         """
+        # Log the status message
+        logger.info(f"Agent status update: {status_message}")
+        
+        # Send a message to the console to indicate tool availability
+        if self.session:
+            try:
+                await self.session.send_message(f"[SYSTEM] {status_message}")
+            except Exception as e:
+                logger.error(f"Error sending status message to console: {e}")
+        
         current_date = datetime.now().strftime("%Y-%m-%d")
         tool_sources_str = ", ".join(self.tool_sources)
         
@@ -723,7 +889,38 @@ async def optimized_entrypoint(ctx: JobContext):
         I can already respond to general questions and requests.
     """
     
-    agent = Agent(instructions=initial_instructions)
+    # Import necessary components for voice capabilities
+    from livekit.plugins import azure, openai, silero
+    
+    # Create the agent with voice capabilities
+    agent = Agent(
+        instructions=initial_instructions,
+        stt=azure.STT(
+            speech_key=os.environ["AZURE_STT_API_KEY"],
+            speech_region=os.environ["AZURE_STT_REGION"]
+        ),
+        llm=openai.LLM.with_azure(
+            api_key=os.environ["AZURE_OPENAI_API_KEY"],
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
+            api_version=os.environ["AZURE_OPENAI_VERSION"],
+            temperature=0.3,  # Lower temperature for more focused and consistent responses
+            parallel_tool_calls=True,
+        ),
+        tts=azure.TTS(
+            speech_key=os.environ["AZURE_TTS_API_KEY"],
+            speech_region=os.environ["AZURE_TTS_REGION"]
+        ),
+        vad=silero.VAD.load(
+            activation_threshold=0.7,  # Slightly lower threshold for better voice detection
+            min_speech_duration=0.2,  # Shorter minimum speech duration (in seconds)
+            min_silence_duration=0.2,  # Shorter silence duration for quicker response (in seconds)
+            sample_rate=16000,  # Explicitly set sample rate
+            force_cpu=True,  # Use CPU for better stability
+            prefix_padding_duration=0.3  # Add small padding before speech
+        ),
+        allow_interruptions=True
+    )
     
     # Create the optimizer
     optimizer = AgentStartupOptimizer()
