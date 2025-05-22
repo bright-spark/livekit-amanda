@@ -34,12 +34,15 @@ import PyPDF2
 import docx
 import pandas as pd
 
-# Import libraries for real-time file monitoring
+# Import libraries for real-time file monitoring and background processing
 import threading
+import queue
+import concurrent.futures
 import watchdog.observers
 import watchdog.events
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from concurrent.futures import ThreadPoolExecutor
 
 # Import our no-API-key search implementations
 try:
@@ -148,7 +151,11 @@ _vector_db = []
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 ENABLE_LOCAL_DATA = os.environ.get("ENABLE_LOCAL_DATA", "true").lower() in ("true", "1", "yes")
 ENABLE_REALTIME_MONITORING = os.environ.get("ENABLE_REALTIME_MONITORING", "true").lower() in ("true", "1", "yes")
+ENABLE_BACKGROUND_EMBEDDING = os.environ.get("ENABLE_BACKGROUND_EMBEDDING", "true").lower() in ("true", "1", "yes")
+MAX_EMBEDDING_WORKERS = int(os.environ.get("MAX_EMBEDDING_WORKERS", "4"))
+EMBEDDING_PROGRESS_INTERVAL = float(os.environ.get("EMBEDDING_PROGRESS_INTERVAL", "5.0"))  # Progress reporting interval in percentage
 VECTOR_CACHE_PATH = os.path.join(DATA_DIR, "vector_cache.pkl")
+EMBEDDING_STATE_PATH = os.path.join(DATA_DIR, "embedding_state.pkl")
 
 def _get_cache_key(query: str, **kwargs) -> str:
     """Generate a cache key for the search query and parameters.
@@ -1036,14 +1043,48 @@ class DataFileHandler(FileSystemEventHandler):
         
         if files_to_process:
             logger.info(f"Processing {len(files_to_process)} new or modified files")
+            processed_files = []
+            
             for file_path in files_to_process:
                 try:
-                    self.data_manager.process_file(file_path)
+                    # Process the file metadata but don't generate embeddings yet
+                    result = self.data_manager.process_file(file_path, generate_embedding=False)
+                    if result:
+                        processed_files.append(file_path)
                 except Exception as e:
                     logger.error(f"Error processing file {file_path}: {e}")
             
-            # Save the updated cache
+            # Save the updated cache for file metadata
             self.data_manager._save_vector_cache()
+            
+            # Queue files for background embedding if any were processed
+            if processed_files and ENABLE_BACKGROUND_EMBEDDING:
+                for file_path in processed_files:
+                    try:
+                        file_id = os.path.relpath(file_path, DATA_DIR)
+                        if file_id in self.data_manager.data_files and file_id not in self.data_manager.embeddings:
+                            # Add to embedding queue
+                            self.data_manager.embedding_queue.put(file_id)
+                            self.data_manager.embedding_state[file_id] = {
+                                'path': file_path,
+                                'timestamp': time.time()
+                            }
+                    except Exception as e:
+                        logger.error(f"Error queueing file for embedding: {file_path}: {e}")
+                
+                # Update the progress tracker if it exists, or create a new one
+                if self.data_manager.embedding_progress:
+                    # Update total files count
+                    with self.data_manager.embedding_progress.lock:
+                        self.data_manager.embedding_progress.total_files += len(processed_files)
+                else:
+                    # Create a new progress tracker
+                    self.data_manager.embedding_progress = EmbeddingProgressTracker(len(processed_files))
+                
+                # Save the embedding state
+                self.data_manager.save_embedding_state()
+                
+                logger.info(f"Queued {len(processed_files)} files for background embedding")
 
 async def invalidate_local_data(file_id: str) -> bool:
     """Invalidate a specific document in the local data store.
@@ -1073,6 +1114,64 @@ async def invalidate_local_data(file_id: str) -> bool:
         logger.error(f"Error invalidating local document: {e}")
         return False
 
+class EmbeddingProgressTracker:
+    """Tracks progress of embedding generation."""
+    
+    def __init__(self, total_files: int):
+        self.total_files = total_files
+        self.processed_files = 0
+        self.start_time = time.time()
+        self.last_report_time = time.time()
+        self.last_report_percentage = 0
+        self.lock = threading.Lock()
+        self.paused = False
+        self.completed = False
+    
+    def update(self, files_processed: int = 1) -> None:
+        """Update the progress tracker."""
+        with self.lock:
+            self.processed_files += files_processed
+            current_percentage = (self.processed_files / self.total_files) * 100 if self.total_files > 0 else 100
+            current_time = time.time()
+            elapsed_time = current_time - self.start_time
+            
+            # Report progress if the percentage has increased by at least EMBEDDING_PROGRESS_INTERVAL
+            if (current_percentage - self.last_report_percentage >= EMBEDDING_PROGRESS_INTERVAL or 
+                current_percentage >= 100 and not self.completed):
+                
+                # Calculate throughput (files per second)
+                throughput = self.processed_files / elapsed_time if elapsed_time > 0 else 0
+                
+                # Log progress
+                logger.info(f"Embedding progress: {current_percentage:.1f}% complete ({self.processed_files}/{self.total_files} files)")
+                logger.info(f"Embedding throughput: {throughput:.2f} files/sec, Time elapsed: {elapsed_time:.2f} seconds")
+                
+                # Update last report time and percentage
+                self.last_report_time = current_time
+                self.last_report_percentage = current_percentage
+                
+                if current_percentage >= 100:
+                    self.completed = True
+                    logger.info("Embedding generation completed successfully")
+    
+    def get_progress(self) -> Dict[str, Any]:
+        """Get the current progress."""
+        with self.lock:
+            current_time = time.time()
+            elapsed_time = current_time - self.start_time
+            percentage = (self.processed_files / self.total_files) * 100 if self.total_files > 0 else 100
+            throughput = self.processed_files / elapsed_time if elapsed_time > 0 else 0
+            
+            return {
+                "total_files": self.total_files,
+                "processed_files": self.processed_files,
+                "percentage": percentage,
+                "elapsed_time": elapsed_time,
+                "throughput": throughput,
+                "paused": self.paused,
+                "completed": self.completed
+            }
+
 class DataManager:
     """Manages loading, processing, and retrieving data from the data directory."""
     
@@ -1081,12 +1180,25 @@ class DataManager:
         self.embeddings = {}
         self.embedding_client = None
         self.file_observer = None
+        self.embedding_executor = None
+        self.embedding_queue = queue.Queue()
+        self.embedding_state = {}
+        self.embedding_progress = None
+        self.embedding_thread = None
+        self.embedding_lock = threading.Lock()
+        self.shutdown_event = threading.Event()
+        
+        # Initialize components
         self.initialize_embedding_client()
+        self.load_embedding_state()
         self.load_data_directory()
         
-        # Start real-time file monitoring if enabled
-        if ENABLE_LOCAL_DATA and ENABLE_REALTIME_MONITORING:
-            self.start_file_monitoring()
+        # Start background services
+        if ENABLE_LOCAL_DATA:
+            if ENABLE_BACKGROUND_EMBEDDING:
+                self.start_background_embedding()
+            if ENABLE_REALTIME_MONITORING:
+                self.start_file_monitoring()
     
     def initialize_embedding_client(self):
         """Initialize the Azure OpenAI embedding client."""
@@ -1102,6 +1214,48 @@ class DataManager:
                 logger.error(f"Failed to initialize Azure OpenAI embedding client: {e}")
         else:
             logger.warning("Azure OpenAI embedding credentials not provided")
+    
+    def load_embedding_state(self):
+        """Load the embedding state from disk."""
+        try:
+            if os.path.exists(EMBEDDING_STATE_PATH):
+                with open(EMBEDDING_STATE_PATH, 'rb') as f:
+                    self.embedding_state = pickle.load(f)
+                logger.info(f"Loaded embedding state with {len(self.embedding_state)} pending files")
+        except Exception as e:
+            logger.warning(f"Failed to load embedding state: {e}")
+            self.embedding_state = {}
+    
+    def save_embedding_state(self):
+        """Save the embedding state to disk."""
+        try:
+            os.makedirs(os.path.dirname(EMBEDDING_STATE_PATH), exist_ok=True)
+            with open(EMBEDDING_STATE_PATH, 'wb') as f:
+                pickle.dump(self.embedding_state, f)
+            logger.info(f"Saved embedding state with {len(self.embedding_state)} pending files")
+        except Exception as e:
+            logger.error(f"Failed to save embedding state: {e}")
+    
+    def start_background_embedding(self):
+        """Start the background embedding thread."""
+        if self.embedding_thread and self.embedding_thread.is_alive():
+            logger.info("Background embedding thread is already running")
+            return
+        
+        try:
+            # Create a thread pool for embedding generation
+            self.embedding_executor = ThreadPoolExecutor(max_workers=MAX_EMBEDDING_WORKERS)
+            
+            # Start the background thread
+            self.embedding_thread = threading.Thread(
+                target=self._background_embedding_worker,
+                daemon=True
+            )
+            self.embedding_thread.start()
+            
+            logger.info(f"Started background embedding thread with {MAX_EMBEDDING_WORKERS} workers")
+        except Exception as e:
+            logger.error(f"Failed to start background embedding thread: {e}")
     
     def start_file_monitoring(self):
         """Start real-time monitoring of the data directory."""
@@ -1134,15 +1288,61 @@ class DataManager:
             except Exception as e:
                 logger.error(f"Error stopping file monitoring: {e}")
     
-    def process_file(self, file_path):
-        """Process a single file and update the index."""
+    def stop_background_embedding(self):
+        """Stop the background embedding thread."""
+        if self.embedding_thread and self.embedding_thread.is_alive():
+            try:
+                # Signal the thread to stop
+                self.shutdown_event.set()
+                
+                # Wait for the thread to finish (with timeout)
+                self.embedding_thread.join(timeout=5.0)
+                
+                # Shutdown the executor
+                if self.embedding_executor:
+                    self.embedding_executor.shutdown(wait=False)
+                
+                # Save the current state
+                self.save_embedding_state()
+                self._save_vector_cache()
+                
+                logger.info("Stopped background embedding thread")
+            except Exception as e:
+                logger.error(f"Error stopping background embedding thread: {e}")
+    
+    def get_embedding_progress(self) -> Dict[str, Any]:
+        """Get the current embedding progress."""
+        if self.embedding_progress:
+            return self.embedding_progress.get_progress()
+        else:
+            return {
+                "total_files": 0,
+                "processed_files": 0,
+                "percentage": 100.0,
+                "elapsed_time": 0.0,
+                "throughput": 0.0,
+                "paused": False,
+                "completed": True
+            }
+    
+    def process_file(self, file_path, generate_embedding=True):
+        """Process a single file and update the index.
+        
+        Args:
+            file_path: Path to the file to process
+            generate_embedding: Whether to generate embedding immediately or queue for background processing
+            
+        Returns:
+            True if the file was processed successfully, False otherwise
+        """
         try:
             path_obj = Path(file_path)
             relative_path = str(path_obj.relative_to(DATA_DIR))
             
-            # Skip the vector cache file itself
-            if relative_path == os.path.basename(VECTOR_CACHE_PATH):
-                return
+            # Skip the vector cache and embedding state files
+            if (relative_path == os.path.basename(VECTOR_CACHE_PATH) or 
+                relative_path == os.path.basename(EMBEDDING_STATE_PATH)):
+                return False
                 
             content = self._load_file_content(path_obj)
             if content:
@@ -1153,22 +1353,33 @@ class DataManager:
                     'last_modified': os.path.getmtime(file_path)
                 }
                 
-                # Generate embedding for this file
-                if len(content) > 8000:
-                    chunks = self._chunk_text(content)
-                    embeddings = []
-                    for chunk in chunks:
-                        embedding = self._get_embedding(chunk)
-                        if embedding:
-                            embeddings.append(embedding)
-                    if embeddings:
-                        self.embeddings[relative_path] = np.mean(embeddings, axis=0)
-                else:
-                    embedding = self._get_embedding(content)
-                    if embedding is not None:
-                        self.embeddings[relative_path] = embedding
-                        
-                logger.info(f"Processed file: {relative_path}")
+                if generate_embedding:
+                    # Generate embedding immediately
+                    if ENABLE_BACKGROUND_EMBEDDING:
+                        # Queue for background processing
+                        self.embedding_queue.put(relative_path)
+                        self.embedding_state[relative_path] = {
+                            'path': str(file_path),
+                            'timestamp': time.time()
+                        }
+                        logger.info(f"Queued file for background embedding: {relative_path}")
+                    else:
+                        # Process synchronously
+                        if len(content) > 8000:
+                            chunks = self._chunk_text(content)
+                            embeddings = []
+                            for chunk in chunks:
+                                embedding = self._get_embedding(chunk)
+                                if embedding:
+                                    embeddings.append(embedding)
+                            if embeddings:
+                                self.embeddings[relative_path] = np.mean(embeddings, axis=0)
+                        else:
+                            embedding = self._get_embedding(content)
+                            if embedding is not None:
+                                self.embeddings[relative_path] = embedding
+                
+                logger.info(f"Processed file metadata: {relative_path}")
                 return True
         except Exception as e:
             logger.error(f"Error processing file {file_path}: {e}")
@@ -1311,31 +1522,143 @@ class DataManager:
             logger.error(f"Error extracting text from Excel {file_path}: {e}")
             return ""
     
+    def _background_embedding_worker(self):
+        """Background worker for processing embedding queue."""
+        logger.info("Background embedding worker started")
+        
+        # Process any pending files from previous runs
+        pending_files = list(self.embedding_state.keys())
+        if pending_files:
+            logger.info(f"Found {len(pending_files)} pending files from previous run")
+            for file_id in pending_files:
+                if file_id in self.data_files and file_id not in self.embeddings:
+                    self.embedding_queue.put(file_id)
+        
+        # Initialize progress tracker if we have pending files
+        if not self.embedding_queue.empty():
+            self.embedding_progress = EmbeddingProgressTracker(self.embedding_queue.qsize())
+        
+        while not self.shutdown_event.is_set():
+            try:
+                # Get a file from the queue with a timeout
+                try:
+                    file_id = self.embedding_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                
+                # Skip if the file is already processed or no longer exists
+                if file_id in self.embeddings or file_id not in self.data_files:
+                    if file_id in self.embedding_state:
+                        del self.embedding_state[file_id]
+                    if self.embedding_progress:
+                        self.embedding_progress.update()
+                    self.embedding_queue.task_done()
+                    continue
+                
+                # Process the file
+                file_data = self.data_files[file_id]
+                content = file_data['content']
+                
+                # Add to embedding state to track progress
+                self.embedding_state[file_id] = {
+                    'path': file_data['path'],
+                    'timestamp': time.time()
+                }
+                
+                # Submit embedding task to the thread pool
+                future = self.embedding_executor.submit(
+                    self._process_file_embedding, file_id, content
+                )
+                
+                # Add callback to handle completion
+                future.add_done_callback(lambda f, fid=file_id: self._embedding_callback(f, fid))
+                
+            except Exception as e:
+                logger.error(f"Error in background embedding worker: {e}")
+                time.sleep(1.0)  # Avoid tight loop on error
+        
+        logger.info("Background embedding worker stopped")
+    
+    def _process_file_embedding(self, file_id: str, content: str) -> Optional[np.ndarray]:
+        """Process a single file for embedding."""
+        try:
+            # For large files, chunk them
+            if len(content) > 8000:
+                chunks = self._chunk_text(content)
+                embeddings = []
+                for chunk in chunks:
+                    embedding = self._get_embedding(chunk)
+                    if embedding:
+                        embeddings.append(embedding)
+                if embeddings:
+                    # Average the embeddings
+                    return np.mean(embeddings, axis=0)
+            else:
+                embedding = self._get_embedding(content)
+                if embedding is not None:
+                    return embedding
+        except Exception as e:
+            logger.error(f"Error generating embedding for {file_id}: {e}")
+        return None
+    
+    def _embedding_callback(self, future, file_id: str):
+        """Callback for when an embedding task is completed."""
+        try:
+            # Get the result (or re-raise any exception)
+            embedding = future.result()
+            
+            # Update the embeddings dictionary
+            if embedding is not None:
+                with self.embedding_lock:
+                    self.embeddings[file_id] = embedding
+                    # Remove from embedding state since it's now complete
+                    if file_id in self.embedding_state:
+                        del self.embedding_state[file_id]
+                
+                # Save the vector cache periodically
+                if len(self.embeddings) % 10 == 0:  # Save every 10 embeddings
+                    self._save_vector_cache()
+                    self.save_embedding_state()
+            
+            # Update progress tracker
+            if self.embedding_progress:
+                self.embedding_progress.update()
+            
+            # Mark task as done
+            self.embedding_queue.task_done()
+            
+        except Exception as e:
+            logger.error(f"Error in embedding callback for {file_id}: {e}")
+            # Mark task as done even on error
+            self.embedding_queue.task_done()
+    
     def _generate_embeddings(self):
-        """Generate embeddings for all loaded documents."""
+        """Queue documents for embedding generation."""
         if not self.embedding_client or not self.data_files:
             return
-            
-        for file_id, file_data in self.data_files.items():
-            try:
-                content = file_data['content']
-                # For large files, chunk them
-                if len(content) > 8000:
-                    chunks = self._chunk_text(content)
-                    embeddings = []
-                    for chunk in chunks:
-                        embedding = self._get_embedding(chunk)
-                        if embedding:
-                            embeddings.append(embedding)
-                    if embeddings:
-                        # Average the embeddings
-                        self.embeddings[file_id] = np.mean(embeddings, axis=0)
-                else:
-                    embedding = self._get_embedding(content)
-                    if embedding is not None:
-                        self.embeddings[file_id] = embedding
-            except Exception as e:
-                logger.error(f"Error generating embedding for {file_id}: {e}")
+        
+        # Count files that need embedding
+        files_to_embed = [file_id for file_id in self.data_files if file_id not in self.embeddings]
+        
+        if not files_to_embed:
+            logger.info("No files need embedding generation")
+            return
+        
+        logger.info(f"Queueing {len(files_to_embed)} files for embedding generation")
+        
+        # Initialize progress tracker
+        self.embedding_progress = EmbeddingProgressTracker(len(files_to_embed))
+        
+        # Queue files for embedding
+        for file_id in files_to_embed:
+            self.embedding_queue.put(file_id)
+            self.embedding_state[file_id] = {
+                'path': self.data_files[file_id]['path'],
+                'timestamp': time.time()
+            }
+        
+        # Save embedding state
+        self.save_embedding_state()
     
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
         """Get embedding for a text using Azure OpenAI."""
@@ -1547,11 +1870,13 @@ def _init_module():
     if ENABLE_RAG:
         _load_vector_db()
 
-# Cleanup function to stop file monitoring when the module is unloaded
+# Cleanup function to stop background services when the module is unloaded
 def _cleanup_module():
     """Clean up resources when the module is unloaded."""
     if hasattr(data_manager, 'stop_file_monitoring'):
         data_manager.stop_file_monitoring()
+    if hasattr(data_manager, 'stop_background_embedding'):
+        data_manager.stop_background_embedding()
 
 # Register cleanup handler for graceful shutdown
 import atexit
