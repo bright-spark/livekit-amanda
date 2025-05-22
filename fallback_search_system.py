@@ -19,18 +19,15 @@ from typing import List, Dict, Any, Optional, Union
 
 # Import debug_search_result function from agent.py
 try:
-    from agent import debug_search_result
+    from agent import debug_search_result, SEARCH_RESULT_MAX_CHARS
     HAS_DEBUG_FUNCTION = True
 except ImportError:
     HAS_DEBUG_FUNCTION = False
+    # Default max chars if we can't import from agent.py
+    SEARCH_RESULT_MAX_CHARS = 1000
     # Fallback debug function if agent.py can't be imported
     def debug_search_result(search_engine: str, query: str, results: any) -> None:
         """Fallback debug output function for search results."""
-        separator = "=" * 80
-        print(separator)
-        print(f"[DEBUG] {search_engine} RESULTS FOR: '{query}'")
-        print(separator)
-        
         # Convert results to string if not already
         if not isinstance(results, str):
             try:
@@ -40,10 +37,14 @@ except ImportError:
         else:
             results_str = results
             
-        # Truncate results if they're too long (default 1000 chars)
-        max_chars = 1000
-        if len(results_str) > max_chars:
-            print(f"{results_str[:max_chars]}...")
+        separator = "=" * 80
+        print(separator)
+        print(f"[DEBUG] {search_engine} RESULTS FOR: '{query}'")
+        print(separator)
+        
+        # Always print results, but truncate if they're too long
+        if len(results_str) > SEARCH_RESULT_MAX_CHARS:
+            print(f"{results_str[:SEARCH_RESULT_MAX_CHARS]}...")
             print(f"[TRUNCATED - {len(results_str)} total characters]")
         else:
             print(results_str)
@@ -66,31 +67,83 @@ WIKIPEDIA_ENABLED = os.environ.get("WIKIPEDIA_ENABLE", "true").lower() in ("true
 HAS_BRAVE_SEARCH = False
 if BRAVE_SEARCH_ENABLED:
     try:
-        from brave_search_free_tier import web_search as brave_web_search
+        from brave_search_free_tier import web_search as brave_search_api
         HAS_BRAVE_SEARCH = True
         logger.info("Brave Search API available and enabled")
     except ImportError:
         try:
             # Try alternative import path
-            from brave_search import web_search as brave_web_search
+            from brave_search import web_search as brave_search_api
             HAS_BRAVE_SEARCH = True
             logger.info("Brave Search API available and enabled (alternative import)")
         except ImportError:
             logger.warning("Brave Search API not available")
 else:
     logger.info("Brave Search API disabled via environment variable")
+    
+# Define our own brave_web_search function to add debug output
+async def brave_web_search(query: str, num_results: int = 5) -> str:
+    """Search the web using Brave Search API and return formatted results.
+    
+    Args:
+        query: The search query
+        num_results: Number of results to return
+        
+    Returns:
+        Formatted string with search results
+    """
+    if not HAS_BRAVE_SEARCH:
+        return f"Brave Search API is not available."
+    
+    try:
+        logger.info(f"Using Brave Search API for query: '{query}'")
+        results = await brave_search_api(query, num_results)
+        
+        # Print debug output
+        debug_search_result("BRAVE SEARCH API", query, results)
+        
+        return results
+    except Exception as e:
+        logger.error(f"Brave Search API error: {e}")
+        return f"Error searching with Brave Search API for '{query}': {str(e)}"
 
 # Try to import DuckDuckGo Search
 HAS_DUCKDUCKGO = False
 if DUCKDUCKGO_SEARCH_ENABLED:
     try:
-        from duckduckgo_search import ddg_web_search
+        from duckduckgo_search import ddg_web_search as ddg_search_api
         HAS_DUCKDUCKGO = True
         logger.info("DuckDuckGo Search available and enabled")
     except ImportError:
         logger.warning("DuckDuckGo Search not available")
 else:
     logger.info("DuckDuckGo Search disabled via environment variable")
+    
+# Define our own ddg_web_search function to add debug output
+async def ddg_web_search(query: str, num_results: int = 5) -> str:
+    """Search the web using DuckDuckGo and return formatted results.
+    
+    Args:
+        query: The search query
+        num_results: Number of results to return
+        
+    Returns:
+        Formatted string with search results
+    """
+    if not HAS_DUCKDUCKGO:
+        return f"DuckDuckGo Search is not available."
+    
+    try:
+        logger.info(f"Using DuckDuckGo Search for query: '{query}'")
+        results = await ddg_search_api(query, num_results)
+        
+        # Print debug output
+        debug_search_result("DUCKDUCKGO SEARCH", query, results)
+        
+        return results
+    except Exception as e:
+        logger.error(f"DuckDuckGo Search error: {e}")
+        return f"Error searching with DuckDuckGo for '{query}': {str(e)}"
 
 # Try to import optimized Bing Search for speed
 HAS_BING_FAST = False

@@ -205,9 +205,6 @@ def debug_search_result(search_engine: str, query: str, results: any) -> None:
         query: The search query
         results: The search results (string or other format)
     """
-    if not SEARCH_RESULT_TRUNCATE:
-        return
-    
     # Convert results to string if not already
     if not isinstance(results, str):
         try:
@@ -222,7 +219,7 @@ def debug_search_result(search_engine: str, query: str, results: any) -> None:
     print(f"[DEBUG] {search_engine} RESULTS FOR: '{query}'")
     print(separator)
     
-    # Truncate results if they're too long
+    # Always print results, but truncate if they're too long
     if len(results_str) > SEARCH_RESULT_MAX_CHARS:
         print(f"{results_str[:SEARCH_RESULT_MAX_CHARS]}...")
         print(f"[TRUNCATED - {len(results_str)} total characters]")
