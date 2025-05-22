@@ -674,8 +674,12 @@ class AIVoiceAssistant:
 # --- BEGIN: entrypoint ---
 
 async def entrypoint(ctx: JobContext):
-    """Main entrypoint for the LiveKit agent application."""
-    agent = FunctionAgent()
+    """Entrypoint function for the LiveKit Amanda agent."""
+    # Use the optimized startup sequence
+    from agent_startup_optimizer import optimized_entrypoint
+    
+    # Use the optimized entrypoint
+    return await optimized_entrypoint(ctx)
     
     web_search_tools = []
     from livekit.agents import function_tool
