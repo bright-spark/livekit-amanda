@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import webbrowser
@@ -181,11 +182,62 @@ WELL_KNOWN_WEBSITES = {
 BROWSER_TOOL = {"gemini"}
 
 # Chunking parameters for voice responses
+CHUNK_ENABLE = os.environ.get("CHUNK_ENABLE", "true").lower() in ("true", "1", "yes")
 MAX_AUTO_CHUNKS = int(os.environ.get("MAX_AUTO_CHUNKS", 10))
 CHUNK_PAUSE = float(os.environ.get("CHUNK_PAUSE", 1.0))
 
-# Log chunking parameters
-logging.info(f"Voice response chunking configured with MAX_AUTO_CHUNKS={MAX_AUTO_CHUNKS}, CHUNK_PAUSE={CHUNK_PAUSE}s")
+# LLM timeout and retry configuration
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", 60.0))  # Default 60 seconds
+LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", 3))  # Default 3 retries
+LLM_RETRY_DELAY = float(os.environ.get("LLM_RETRY_DELAY", 2.0))  # Default 2 seconds
+LLM_RETRY_BACKOFF = float(os.environ.get("LLM_RETRY_BACKOFF", 1.5))  # Default exponential backoff factor
+
+# Search result configuration
+SEARCH_RESULT_TRUNCATE = os.environ.get("SEARCH_RESULT_TRUNCATE", "true").lower() in ("true", "1", "yes")
+SEARCH_RESULT_MAX_CHARS = int(os.environ.get("SEARCH_RESULT_MAX_CHARS", 1000))  # Default 1000 characters per result
+
+# Debug output function for search results
+def debug_search_result(search_engine: str, query: str, results: any) -> None:
+    """Print debug output for search results to the console.
+    
+    Args:
+        search_engine: Name of the search engine
+        query: The search query
+        results: The search results (string or other format)
+    """
+    if not SEARCH_RESULT_TRUNCATE:
+        return
+    
+    # Convert results to string if not already
+    if not isinstance(results, str):
+        try:
+            results_str = str(results)
+        except Exception as e:
+            results_str = f"[Error converting results to string: {e}]"
+    else:
+        results_str = results
+        
+    separator = "=" * 80
+    print(separator)
+    print(f"[DEBUG] {search_engine} RESULTS FOR: '{query}'")
+    print(separator)
+    
+    # Truncate results if they're too long
+    if len(results_str) > SEARCH_RESULT_MAX_CHARS:
+        print(f"{results_str[:SEARCH_RESULT_MAX_CHARS]}...")
+        print(f"[TRUNCATED - {len(results_str)} total characters]")
+    else:
+        print(results_str)
+    
+    print(separator)
+    # Force flush stdout to ensure output is displayed immediately
+    sys.stdout.flush()
+
+# Log configuration parameters
+logging.info(f"Voice response chunking configured with CHUNK_ENABLE={CHUNK_ENABLE}, MAX_AUTO_CHUNKS={MAX_AUTO_CHUNKS}, CHUNK_PAUSE={CHUNK_PAUSE}s")
+logging.info(f"LLM timeout configuration: TIMEOUT={LLM_TIMEOUT}s, MAX_RETRIES={LLM_MAX_RETRIES}, RETRY_DELAY={LLM_RETRY_DELAY}s, BACKOFF={LLM_RETRY_BACKOFF}")
+logging.info(f"Search result configuration: TRUNCATE={SEARCH_RESULT_TRUNCATE}, MAX_CHARS={SEARCH_RESULT_MAX_CHARS}")
+
 
 def sanitize_for_azure(text: str) -> str:
     """Reword or mask terms that may trigger Azure OpenAI's content filter."""
@@ -240,15 +292,44 @@ def clean_spoken(text):
             text += '.'
     return text
 
-def handle_tool_results(session, results) -> None:
+def debug_search_result(search_tool_name, query, result):
+    """Print truncated search results to the console for debugging."""
+    if not result:
+        print(f"\n[DEBUG] {search_tool_name} - No results for query: '{query}'\n")
+        return
+        
+    # Truncate the result if needed
+    truncated = result[:SEARCH_RESULT_MAX_CHARS]
+    if len(result) > SEARCH_RESULT_MAX_CHARS:
+        truncated += f"... [truncated, {len(result) - SEARCH_RESULT_MAX_CHARS} more characters]"
+        
+    # Print to console with clear formatting
+    print(f"\n{'=' * 80}")
+    print(f"[DEBUG] {search_tool_name} RESULTS FOR: '{query}'")
+    print(f"{'=' * 80}")
+    print(truncated)
+    print(f"{'=' * 80}\n")
+
+async def handle_tool_results(session, results) -> None:
     """Speak tool results: if a single result, speak it; if multiple, combine and speak once."""
-    if is_sequence_but_not_str(results):
-        combined = '\n\n'.join(str(r) for r in results if r)
-        combined = clean_spoken(combined)
-        return speak_chunks(session, combined, max_auto_chunks=MAX_AUTO_CHUNKS, pause=CHUNK_PAUSE)
+    if not CHUNK_ENABLE:
+        # If chunking is disabled, just send the full message
+        if is_sequence_but_not_str(results):
+            combined = '\n\n'.join(str(r) for r in results if r)
+            combined = clean_spoken(combined)
+            return await session.add_message(role="assistant", content=combined)
+        else:
+            results = clean_spoken(results)
+            return await session.add_message(role="assistant", content=results)
     else:
-        results = clean_spoken(results)
-        return speak_chunks(session, results, max_auto_chunks=MAX_AUTO_CHUNKS, pause=CHUNK_PAUSE) # type: ignore
+        # Use chunking as configured
+        if is_sequence_but_not_str(results):
+            combined = '\n\n'.join(str(r) for r in results if r)
+            combined = clean_spoken(combined)
+            return speak_chunks(session, combined, max_auto_chunks=MAX_AUTO_CHUNKS, pause=CHUNK_PAUSE)
+        else:
+            results = clean_spoken(results)
+            return speak_chunks(session, results, max_auto_chunks=MAX_AUTO_CHUNKS, pause=CHUNK_PAUSE) # type: ignore
 
 class FunctionAgent(Agent):
     """A LiveKit agent that uses MCP tools from one or more MCP servers."""
@@ -630,6 +711,9 @@ async def entrypoint(ctx: JobContext):
             logging.info(f"Using Brave Search API explicitly for query: '{query}'")
             results = await brave_web_search(query, num_results)
             
+            # Print debug output to console
+            debug_search_result("BRAVE SEARCH", query, results)
+            
             session = getattr(context, 'session', None)
             if session:
                 await handle_tool_results(session, results)
@@ -662,13 +746,23 @@ async def entrypoint(ctx: JobContext):
             try:
                 from bing_search import bing_search as bing_search_fast
                 logging.info(f"Using fast Bing search for query: '{query}'")
-                return await bing_search_fast(context, query, num_results)
+                results = await bing_search_fast(context, query, num_results)
+                
+                # Print debug output to console
+                debug_search_result("BING SEARCH (FAST)", query, results)
+                
+                return results
             except ImportError:
                 # Try to import from bing_extended.py (quality version)
                 try:
                     from bing_extended import bing_search as bing_search_quality
                     logging.info(f"Using quality Bing search for query: '{query}'")
-                    return await bing_search_quality(context, query, num_results)
+                    results = await bing_search_quality(context, query, num_results)
+                    
+                    # Print debug output to console
+                    debug_search_result("BING SEARCH (QUALITY)", query, results)
+                    
+                    return results
                 except ImportError:
                     return "Bing Search is not available. Please try another search tool."
         except Exception as e:
@@ -699,6 +793,9 @@ async def entrypoint(ctx: JobContext):
                 from duckduckgo_search import ddg_web_search
                 logging.info(f"Using DuckDuckGo search for query: '{query}'")
                 results = await ddg_web_search(query, num_results)
+                
+                # Print debug output to console
+                debug_search_result("DUCKDUCKGO SEARCH", query, results)
                 
                 session = getattr(context, 'session', None)
                 if session:
@@ -764,6 +861,9 @@ async def entrypoint(ctx: JobContext):
                 for i, result in enumerate(results_list, 1):
                     formatted += f"{i}. {result}\n\n"
                 
+                # Print debug output to console
+                debug_search_result("GOOGLE SEARCH", query, formatted)
+                
                 session = getattr(context, 'session', None)
                 if session:
                     await handle_tool_results(session, formatted)
@@ -785,7 +885,7 @@ async def entrypoint(ctx: JobContext):
         # Use Brave Search API as the primary search method
         @function_tool
         async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
-            """Search the web for information using Brave Search API.
+            """Search the web and return formatted results.
             
             Args:
                 context: The run context for the tool
@@ -795,46 +895,44 @@ async def entrypoint(ctx: JobContext):
             Returns:
                 str: Formatted search results with titles and URLs
             """
+            logging.info(f"Using Brave Search API for query: '{query}'")
+            logging.info(f"[TOOL] web_search called for query: {query}, num_results: {num_results}")
+            
+            # Ensure query is a string
+            if not isinstance(query, str):
+                query = str(query)
+                
+            # Ensure num_results is an integer
+            if not isinstance(num_results, int):
+                try:
+                    num_results = int(num_results)
+                except (ValueError, TypeError):
+                    num_results = 5
+            
+            # Limit number of results to a reasonable range
+            num_results = max(1, min(num_results, 10))
+            
+            start_time = time.time()
             try:
-                if not isinstance(query, str):
-                    query = str(query)
-                
-                # Ensure num_results is an integer
-                if not isinstance(num_results, int):
-                    try:
-                        num_results = int(num_results)
-                    except (ValueError, TypeError):
-                        num_results = 5
-                
-                # Limit number of results to a reasonable range
-                num_results = max(1, min(num_results, 10))
-                
-                logging.info(f"Using Brave Search API for query: '{query}'")
+                # Use Brave Search API
                 results = await brave_web_search(query, num_results)
                 
+                # Print debug output to console
+                debug_search_result("WEB SEARCH (BRAVE PRIMARY)", query, results)
+                
+                # Handle session output for voice responses if available
                 session = getattr(context, 'session', None)
                 if session:
                     await handle_tool_results(session, results)
-                    return "I've found some results using Brave Search and will read them to you now."
+                    return "I've found some results and will read them to you now."
+                
                 return results
             except Exception as e:
-                logging.error(f"Error in web_search using Brave Search API: {e}")
-                
-                # If Brave Search fails and fallback system is available, use it
-                if HAS_FALLBACK_SEARCH:
-                    try:
-                        logging.info(f"Brave Search failed, using fallback search system for query: '{query}'")
-                        results = await fallback_search(context, query, num_results)
-                        return results
-                    except Exception as fallback_error:
-                        logging.error(f"Fallback search error: {fallback_error}")
-                
-                error_msg = f"I couldn't find any results for '{query}'. Try a different query."
-                session = getattr(context, 'session', None)
-                if session:
-                    await handle_tool_results(session, error_msg)
-                    return "I couldn't find any results for your search."
-                return error_msg
+                logging.error(f"Error in web_search: {e}")
+                return await fallback_web_search(context, query, num_results)
+            finally:
+                end_time = time.time()
+                logging.info(f"[PERFORMANCE] web_search completed in {end_time - start_time:.4f}s")
         
         @function_tool
         async def fallback_web_search(context: RunContext, query: str, num_results: int = 10) -> str:
@@ -852,12 +950,23 @@ async def entrypoint(ctx: JobContext):
             if HAS_FALLBACK_SEARCH:
                 try:
                     logging.info(f"Using fallback search system for query: '{query}'")
-                    return await fallback_search(context, query, max(num_results, 10))
+                    results = await fallback_search(context, query, max(num_results, 10))
+                    
+                    # Print debug output to console
+                    debug_search_result("FALLBACK SEARCH SYSTEM", query, results)
+                    
+                    return results
                 except Exception as e:
                     logging.error(f"Fallback search error: {e}")
             
             # Otherwise, just use the primary web_search with more results
-            return await web_search(context, query, max(num_results, 10))
+            logging.info(f"Fallback search system not available, using primary web_search for query: '{query}'")
+            results = await web_search(context, query, max(num_results, 10))
+            
+            # Print debug output to console
+            debug_search_result("FALLBACK TO PRIMARY", query, results)
+            
+            return results
     
     elif HAS_BRAVE_SEARCH:
         # Use Brave Search API if available

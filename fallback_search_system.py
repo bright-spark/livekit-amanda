@@ -14,7 +14,42 @@ The system tries each search method in order until one succeeds.
 import asyncio
 import logging
 import os
+import sys
 from typing import List, Dict, Any, Optional, Union
+
+# Import debug_search_result function from agent.py
+try:
+    from agent import debug_search_result
+    HAS_DEBUG_FUNCTION = True
+except ImportError:
+    HAS_DEBUG_FUNCTION = False
+    # Fallback debug function if agent.py can't be imported
+    def debug_search_result(search_engine: str, query: str, results: any) -> None:
+        """Fallback debug output function for search results."""
+        separator = "=" * 80
+        print(separator)
+        print(f"[DEBUG] {search_engine} RESULTS FOR: '{query}'")
+        print(separator)
+        
+        # Convert results to string if not already
+        if not isinstance(results, str):
+            try:
+                results_str = str(results)
+            except Exception as e:
+                results_str = f"[Error converting results to string: {e}]"
+        else:
+            results_str = results
+            
+        # Truncate results if they're too long (default 1000 chars)
+        max_chars = 1000
+        if len(results_str) > max_chars:
+            print(f"{results_str[:max_chars]}...")
+            print(f"[TRUNCATED - {len(results_str)} total characters]")
+        else:
+            print(results_str)
+        
+        print(separator)
+        sys.stdout.flush()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -132,11 +167,20 @@ async def bing_web_search(query: str, num_results: int = 5, context=None) -> str
             if context:
                 # If we have a context, use the function_tool version
                 results = await bing_search_fast(context, query, num_results)
+                
+                # Print debug output
+                debug_search_result("BING SEARCH (FAST)", query, results)
+                
                 return results
             else:
                 # Otherwise use the direct scraper
                 results = await bing_async_scrape_fast(query, num_results)
-                return format_bing_results_fast(results, query)
+                formatted_results = format_bing_results_fast(results, query)
+                
+                # Print debug output
+                debug_search_result("BING SEARCH (FAST)", query, formatted_results)
+                
+                return formatted_results
         except Exception as e:
             logger.error(f"Fast Bing search error: {e}")
             logger.info(f"Falling back to quality Bing search for query: '{query}'")
@@ -148,11 +192,20 @@ async def bing_web_search(query: str, num_results: int = 5, context=None) -> str
             if context:
                 # If we have a context, use the function_tool version
                 results = await bing_search_quality(context, query, num_results)
+                
+                # Print debug output
+                debug_search_result("BING SEARCH (QUALITY)", query, results)
+                
                 return results
             else:
                 # Otherwise use the direct scraper
                 results = await bing_scrape_quality(query, num_results=num_results)
-                return await format_bing_results(results, query)
+                formatted_results = await format_bing_results(results, query)
+                
+                # Print debug output
+                debug_search_result("BING SEARCH (QUALITY)", query, formatted_results)
+                
+                return formatted_results
         except Exception as e:
             logger.error(f"Quality Bing search error: {e}")
     
@@ -178,6 +231,9 @@ async def google_web_search(query: str, num_results: int = 5) -> str:
         
         for i, result in enumerate(results, 1):
             formatted += f"{i}. {result}\n\n"
+        
+        # Print debug output
+        debug_search_result("GOOGLE SEARCH", query, formatted)
         
         return formatted
     except Exception as e:
@@ -218,6 +274,9 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
             logger.info(f"Trying Brave Search API for query: '{query}'")
             brave_results = await brave_web_search(query, num_results)
             
+            # Print debug output
+            debug_search_result("FALLBACK BRAVE SEARCH", query, brave_results)
+            
             if brave_results and "I couldn't find any results" not in brave_results:
                 logger.info(f"Brave Search succeeded for query: '{query}'")
                 return brave_results
@@ -229,10 +288,14 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
     # First try fast Bing search (optimized for speed)
     if BING_SEARCH_ENABLED and HAS_BING_FAST:
         try:
-            logger.info(f"Trying fast Bing search for query: '{query}'")
+            logger.info(f"Trying Fast Bing Search for query: '{query}'")
             if context:
                 # If we have a context, use the function_tool version
                 bing_results = await bing_search_fast(context, query, num_results)
+                
+                # Print debug output
+                debug_search_result("FALLBACK BING SEARCH (FAST)", query, bing_results)
+                
                 if bing_results and "No results found" not in bing_results:
                     logger.info(f"Fast Bing search succeeded for query: '{query}'")
                     return bing_results
@@ -241,7 +304,11 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
                 bing_results = await bing_async_scrape_fast(query, num_results)
                 if bing_results:
                     logger.info(f"Fast Bing search succeeded for query: '{query}'")
-                    formatted_results = await format_bing_results(bing_results, query)
+                    formatted_results = format_bing_results_fast(bing_results, query)
+                    
+                    # Print debug output
+                    debug_search_result("FALLBACK BING SEARCH (FAST)", query, formatted_results)
+                    
                     return formatted_results
             logger.warning(f"Fast Bing search returned no results for query: '{query}'")
         except Exception as e:
@@ -250,10 +317,14 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
     # If fast Bing search fails, try quality Bing search if enabled
     if BING_SEARCH_ENABLED and HAS_BING_QUALITY:
         try:
-            logger.info(f"Trying quality Bing search for query: '{query}'")
+            logger.info(f"Trying Quality Bing Search for query: '{query}'")
             if context:
                 # If we have a context, use the function_tool version
                 bing_results = await bing_search_quality(context, query, num_results)
+                
+                # Print debug output
+                debug_search_result("FALLBACK BING SEARCH (QUALITY)", query, bing_results)
+                
                 if bing_results and "No results found" not in bing_results:
                     logger.info(f"Quality Bing search succeeded for query: '{query}'")
                     return bing_results
@@ -273,6 +344,10 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
         try:
             logger.info(f"Trying DuckDuckGo Search for query: '{query}'")
             ddg_results = await ddg_web_search(query, num_results)
+            
+            # Print debug output
+            debug_search_result("FALLBACK DUCKDUCKGO SEARCH", query, ddg_results)
+            
             if ddg_results and "No results found" not in ddg_results:
                 logger.info(f"DuckDuckGo Search succeeded for query: '{query}'")
                 return ddg_results
@@ -286,9 +361,15 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
             logger.info(f"Trying Quality Bing Search for query: '{query}'")
             if context:
                 bing_results = await bing_search_quality(context, query, num_results)
+                
+                # Print debug output
+                debug_search_result("FALLBACK QUALITY BING SEARCH", query, bing_results)
             else:
                 results = await bing_scrape_quality(query, num_results=num_results)
                 bing_results = await format_bing_results(results, query)
+                
+                # Print debug output
+                debug_search_result("FALLBACK QUALITY BING SEARCH", query, bing_results)
                 
             if bing_results and "No results found" not in bing_results and "An error occurred" not in bing_results:
                 logger.info(f"Quality Bing Search succeeded for query: '{query}'")
@@ -302,6 +383,10 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
         try:
             logger.info(f"Trying Google Search for query: '{query}'")
             google_results = await google_web_search(query, num_results)
+            
+            # Print debug output
+            debug_search_result("FALLBACK GOOGLE SEARCH", query, google_results)
+            
             if google_results and "No results found" not in google_results:
                 logger.info(f"Google Search succeeded for query: '{query}'")
                 return google_results
