@@ -1,6 +1,6 @@
 # LiveKit Amanda - Advanced Voice Assistant & API
 
-An advanced voice assistant application built using the LiveKit Agents framework, capable of using Multimodal Control Protocol (MCP) tools to interact with external services. The assistant includes specialized functionality for web scraping, job search capabilities, and is now available as a FastAPI web service.
+An advanced voice assistant application built using the LiveKit Agents framework, capable of using Multimodal Control Protocol (MCP) tools to interact with external services. The assistant includes specialized functionality for web search, job search capabilities, and is now available as a FastAPI web service. It features optimized caching systems for various search providers and configurable Brave Search API integration.
 
 ## Medium Article
 
@@ -10,14 +10,55 @@ An advanced voice assistant application built using the LiveKit Agents framework
 
 - Voice-based interaction with a helpful AI assistant
 - Integration with MCP tools from external servers
-- Web scraping capabilities with proxy support for Locanto and other sites
-- Job search capabilities with Indeed integration
+- Web search capabilities using Brave Search API with separate AI and Web search modes
+- Job search capabilities with Indeed and Locanto integration
 - Speech-to-text using Azure
 - Natural language processing primarily using Azure OpenAI (with optional support for other LLM providers)
 - Text-to-speech using Azure
 - Voice activity detection using Silero
 - Configurable proxy support for web scraping
 - REST API with FastAPI for programmatic access to all features
+- Advanced caching system with configurable TTLs and invalidation strategies
+- Statistics tracking for monitoring cache and API performance
+
+## Brave Search API Integration
+
+The application uses the Brave Search API for web searches and job listings with the following optimizations:
+
+### Separate API Keys and Rate Limits
+
+- **Web Search**: Uses a dedicated API key (`BRAVE_WEB_SEARCH_API_KEY`) with configurable rate limits
+- **AI Search**: Uses a separate API key (`BRAVE_AI_SEARCH_API_KEY`) with its own rate limits
+- **Persistent Cache**: Uses a dedicated API key (`BRAVE_PERSISTENT_CACHE_API_KEY`) for caching operations
+- **Grounding**: Uses a dedicated API key (`BRAVE_GROUNDING_API_KEY`) for grounding queries
+
+### Elastic Parallel Processing
+
+The system supports elastic parallel processing for Brave Search API requests, particularly for grounding operations:
+
+- **Multiple API Keys**: Supports multiple API keys per search type for parallel processing
+- **Key Rotation**: Implements a round-robin key rotation strategy to distribute load
+- **Per-Key Rate Limiting**: Each API key has its own rate limiting semaphore (1 request at a time per key)
+- **Elastic Scaling**: Automatically scales based on the number of available API keys
+
+This architecture allows for efficient handling of concurrent requests while respecting Brave Search API's rate limits. See the [Brave Search Grounding API Documentation](BRAVE_SEARCH_GROUNDING_API_README.md) for more details.
+
+This separation allows for better resource allocation and prevents one search type from consuming the entire API quota.
+
+### Advanced Caching System
+
+The application implements specialized caching for different search types:
+
+1. **Locanto Cache**: Optimized for job listings with longer TTLs and automatic invalidation of stale listings
+2. **Indeed Cache**: Configured for faster-changing job data with shorter TTLs and more frequent updates
+3. **Brave Search Cache**: Separate caches for AI and Web searches with content-aware TTL settings
+
+Each cache implementation features:
+- In-memory LRU caching for speed
+- Persistent disk caching for durability
+- Automatic invalidation of expired entries
+- Statistics tracking for monitoring performance
+- Configurable cache sizes and TTLs
 
 ## API Service
 
@@ -79,6 +120,17 @@ The API includes automatic Swagger documentation at `/docs` and ReDoc at `/redoc
    
    # Proxy Configuration
    PROXY_URL=your_proxy_url
+   
+   # Brave Search Configuration
+   # Separate API keys for different search types
+   BRAVE_WEB_SEARCH_API_KEY=your_brave_web_search_api_key
+   BRAVE_AI_SEARCH_API_KEY=your_brave_ai_search_api_key
+   
+   # Brave Search Optimization Settings
+   BRAVE_SEARCH_ENABLE_CACHE=true
+   BRAVE_SEARCH_ENABLE_PERSISTENCE=true
+   BRAVE_WEB_SEARCH_RATE_LIMIT=1  # 1 for free tier, 20 for paid tier
+   BRAVE_AI_SEARCH_RATE_LIMIT=1   # 1 for free tier, 20 for paid tier
    
    # OpenWeather Configuration
    OPENWEATHER_API_KEY=your_openweather_api_key
@@ -234,8 +286,30 @@ The agent will connect to the specified LiveKit room and start listening for voi
 - `app.py`: FastAPI application for REST API
 - `Dockerfile`: Docker configuration for containerization
 - `docker-compose.yml`: Docker Compose configuration for running the application
+
+### Brave Search API and Caching
+
+- `brave_search.py`: Unified interface for both Web and AI search functionality
+- `brave_web_search.py`: Implementation of Web Search using Brave Search API
+- `brave_ai_search.py`: Implementation of AI Search using Brave Search API
+- `brave_search_stats.py`: Statistics tracking for Brave Search API usage
+- `brave_stats_cli.py`: Command-line interface for viewing Brave Search statistics
+
+### Caching System
+
+- `cache_manager.py`: Base cache manager with memory and disk caching capabilities
+- `locanto_cache.py`: Specialized cache for Locanto job searches
+- `indeed_cache.py`: Specialized cache for Indeed job searches
+- `brave_search_cache.py`: Specialized cache for Brave Search (AI & Web)
+- `cache_config.py`: Unified interface for configuring and tuning all caches
+
+### Legacy Scrapers
+
 - `locanto_browser_scraper.py`: Web scraper for Locanto job listings
 - `indeed.py`: Web scraper for Indeed job listings
+
+### Utilities and Tools
+
 - `tools.py`: Utility functions and tools used by the agent
 - `mcp_client/`: Package for MCP server integration
   - `server.py`: MCP server connection handlers

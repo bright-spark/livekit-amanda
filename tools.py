@@ -188,48 +188,110 @@ async def get_weather(context: RunContext, location: str) -> str:
 
 @function_tool
 async def get_news(context: RunContext, topic: str = "", country: str = "US") -> str:
+    """Get the latest news headlines, optionally filtered by topic and country.
+    
+    Args:
+        context: The run context for the tool
+        topic: Optional topic to focus the news search on
+        country: Country to get news from (default: US)
+        
+    Returns:
+        str: Formatted news headlines
+    """
     import logging
     import html
+    from bs4 import BeautifulSoup
+    
+    # Ensure parameters are strings
+    if not isinstance(topic, str):
+        topic = str(topic)
+    if not isinstance(country, str):
+        country = str(country)
+    
+    # Build search query
     search_query = topic if topic else "breaking news"
     if country and country.upper() != "US":
         search_query += f" {country} news"
-    # Use web_search for news
-    results = await web_search(context, search_query)
-    if not results or "I couldn't find any results" in results:
-        msg = f"I couldn't find any recent news{' about ' + topic if topic else ''}{' in ' + country if country and country.upper() != 'US' else ''}. Would you like me to search for something else?"
-        msg = sanitize_for_azure(msg)
-        logging.info(f"[TOOL] get_news_headlines: {msg}")
-        return msg
-    # Optionally, parse results for top headlines (simple extraction)
-    # If results is HTML, try to extract headlines
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(results, 'html.parser')
-    headlines = []
-    for result in soup.find_all(['h3', 'h2', 'h1'], limit=4):
-        text = result.get_text(strip=True)
-        if text:
-            headlines.append(text)
-    if not headlines:
-        # If not HTML, treat as plain text
-        lines = [line.strip() for line in results.split('\n') if line.strip()]
-        headlines = lines[:4]
-    if not headlines:
-        msg = f"I couldn't find any recent news{' about ' + topic if topic else ''}{' in ' + country if country and country.upper() != 'US' else ''}. Would you like me to search for something else?"
-        msg = sanitize_for_azure(msg)
-        logging.info(f"[TOOL] get_news_headlines: {msg}")
-        return msg
-    topic_str = f" about {topic}" if topic else ""
-    country_str = f" in {country}" if country and country.upper() != "US" else ""
-    formatted_results = f"Here are the latest headlines{topic_str}{country_str}:\n"
-    for i, headline in enumerate(headlines, 1):
-        formatted_results += f"Headline {i}: {headline}\n\n"
-    formatted_results = sanitize_for_azure(formatted_results)
-    logging.info(f"[TOOL] get_news_headlines results: {formatted_results}")
-    session = getattr(context, 'session', None)
-    if session:
-        await handle_tool_results(session, formatted_results)
-        return "Here are the latest news headlines. I'll read them to you."
-    return formatted_results
+    
+    logging.info(f"[TOOL] get_news called for topic: '{topic}', country: '{country}', search_query: '{search_query}'")
+    
+    try:
+        # Use web_search for news with 5 results
+        results = await web_search(context, search_query, 5)
+        
+        # Check if the web_search failed
+        if not results or "I couldn't find any results" in results or "I've found some results" in results:
+            # If web_search returned a message about reading results, we need to extract the actual content
+            if "I've found some results" in results:
+                # The actual content was likely sent to the session, so we'll create a fallback
+                headlines = [f"Latest {topic if topic else 'breaking'} news"]
+            else:
+                # Web search failed completely
+                msg = f"I couldn't find any recent news{' about ' + topic if topic else ''}{' in ' + country if country and country.upper() != 'US' else ''}. Would you like me to search for something else?"
+                msg = sanitize_for_azure(msg)
+                logging.info(f"[TOOL] get_news_headlines: {msg}")
+                return msg
+        else:
+            # Parse results for top headlines
+            soup = BeautifulSoup(results, 'html.parser')
+            headlines = []
+            
+            # Try to extract headlines from HTML content
+            for result in soup.find_all(['h3', 'h2', 'h1'], limit=5):
+                text = result.get_text(strip=True)
+                if text:
+                    headlines.append(text)
+            
+            # If no headlines found in HTML, treat as plain text
+            if not headlines:
+                lines = [line.strip() for line in results.split('\n') if line.strip()]
+                for line in lines:
+                    if ':' in line and len(line) > 15:  # Likely a headline
+                        headlines.append(line)
+                    elif line.startswith('http') or line.startswith('www'):  # Skip URLs
+                        continue
+                    elif len(line) > 30 and len(line) < 150:  # Reasonable headline length
+                        headlines.append(line)
+                
+                # Take only the first 5 potential headlines
+                headlines = headlines[:5]
+        
+        # If still no headlines, provide a fallback message
+        if not headlines:
+            msg = f"I found news{' about ' + topic if topic else ''}{' in ' + country if country and country.upper() != 'US' else ''}, but couldn't extract specific headlines. Try a more specific search query."
+            msg = sanitize_for_azure(msg)
+            logging.info(f"[TOOL] get_news_headlines: {msg}")
+            return msg
+        
+        # Format the results
+        topic_str = f" about {topic}" if topic else ""
+        country_str = f" in {country}" if country and country.upper() != "US" else ""
+        formatted_results = f"Here are the latest headlines{topic_str}{country_str}:\n\n"
+        
+        for i, headline in enumerate(headlines, 1):
+            formatted_results += f"Headline {i}: {headline}\n\n"
+        
+        formatted_results = sanitize_for_azure(formatted_results)
+        logging.info(f"[TOOL] get_news results: {formatted_results}")
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, formatted_results)
+            return "Here are the latest news headlines. I'll read them to you."
+        
+        return formatted_results
+        
+    except Exception as e:
+        logging.error(f"[TOOL] get_news exception: {e}")
+        error_msg = f"I encountered an error while searching for news{' about ' + topic if topic else ''}{' in ' + country if country and country.upper() != 'US' else ''}. Would you like me to try a different search?"
+        error_msg = sanitize_for_azure(error_msg)
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I encountered an error while searching for news."
+        
+        return error_msg
 
 @function_tool
 async def calculate(context: RunContext, expression: str) -> str:
@@ -957,15 +1019,46 @@ async def wikipedia_search(context: RunContext, query: str, max_results: int = 3
     Returns:
         str: The search results or an error message
     """
+    # Ensure query is a string
+    if not isinstance(query, str):
+        query = str(query)
+    
+    # Ensure max_results is an integer
+    if not isinstance(max_results, int):
+        try:
+            max_results = int(max_results)
+        except (ValueError, TypeError):
+            max_results = 3
+    
+    # Limit the number of results
+    max_results = max(1, min(max_results, 5))
+    
     logging.info(f"[TOOL] wikipedia_search called for query: {query}, max_results: {max_results}")
+    
     try:
-        # Limit the number of results
-        max_results = min(max_results, 5)
-        
         # Use Wikipedia API to search
-        wiki_wiki = wikipediaapi.Wikipedia('en')
+        wiki_wiki = wikipediaapi.Wikipedia(
+            language='en',
+            extract_format=wikipediaapi.ExtractFormat.WIKI,
+            user_agent='AIVoiceAssistant/1.0'
+        )
+        
+        # First try direct page lookup
         search_results = wiki_wiki.page(query)
         
+        # If direct lookup fails, try opensearch
+        if not search_results.exists():
+            try:
+                # Use opensearch to find similar pages
+                search_suggestions = wiki_wiki.opensearch(query)
+                if search_suggestions and len(search_suggestions) > 0:
+                    # Try the first suggestion
+                    search_results = wiki_wiki.page(search_suggestions[0])
+                    logging.info(f"[TOOL] wikipedia_search used suggestion: {search_suggestions[0]}")
+            except Exception as search_error:
+                logging.error(f"[TOOL] wikipedia_search opensearch error: {search_error}")
+        
+        # If we still don't have results
         if not search_results.exists():
             msg = f"No Wikipedia article found for query: {query}"
             msg = sanitize_for_azure(msg)
@@ -976,7 +1069,19 @@ async def wikipedia_search(context: RunContext, query: str, max_results: int = 3
             return msg
         
         # Get the summary
-        summary = search_results.summary[0:1000] + "..." if len(search_results.summary) > 1000 else search_results.summary
+        summary = search_results.summary
+        if not summary:
+            msg = f"Found Wikipedia article for '{query}' but it doesn't have a summary."
+            msg = sanitize_for_azure(msg)
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, msg)
+                return "I found a Wikipedia article but it doesn't have a summary."
+            return msg
+        
+        # Truncate if too long
+        if len(summary) > 1000:
+            summary = summary[0:1000] + "..."
         
         formatted_results = f"Wikipedia search result for '{query}':\n\n{summary}\n\nURL: {search_results.fullurl}"
         formatted_results = sanitize_for_azure(formatted_results)
@@ -994,7 +1099,7 @@ async def wikipedia_search(context: RunContext, query: str, max_results: int = 3
         session = getattr(context, 'session', None)
         if session:
             await handle_tool_results(session, error_msg)
-            return "I encountered an error while searching Wikipedia. I'll read the error message to you."
+            return "I encountered an error while searching Wikipedia. I'll try a different approach."
         return error_msg
 
 @function_tool
@@ -1188,9 +1293,36 @@ async def scrape_website(context: RunContext, url: str, selector: str = "body", 
         return error_msg
     
 @function_tool
-async def web_search(context: RunContext, query: str) -> str:
+async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
+    """Search the web for information.
+    
+    Args:
+        context: The run context for the tool
+        query: The search query
+        num_results: Number of results to return (1-10)
+        
+    Returns:
+        str: Formatted search results with titles and URLs
+    """
     import logging
     from bs4 import BeautifulSoup
+    
+    # Ensure query is a string
+    if not isinstance(query, str):
+        query = str(query)
+    
+    # Ensure num_results is an integer
+    if not isinstance(num_results, int):
+        try:
+            num_results = int(num_results)
+        except (ValueError, TypeError):
+            num_results = 5
+    
+    # Limit number of results to a reasonable range
+    num_results = max(1, min(num_results, 10))
+    
+    logging.info(f"[TOOL] web_search called for query: {query}, num_results: {num_results}")
+    
     try:
         try:
             from bing_playwright_scraper import scrape_bing
@@ -1200,12 +1332,15 @@ async def web_search(context: RunContext, query: str) -> str:
             except ImportError:
                 logging.error("bing_playwright_scraper module not available")
                 return f"I couldn't find any results for '{query}'. The search functionality is currently unavailable."
-        results = await scrape_bing(query, num_results=5)
+        
+        results = await scrape_bing(query, num_results=num_results)
         logging.info(f"[web_search] Playwright Bing results: {results}")
+        
         if results and isinstance(results, list) and all('title' in r and 'link' in r for r in results):
-            spoken = f"Here are the top results for {query} from Bing:\n"
-            for i, r in enumerate(results[:3], 1):
-                spoken += f"{i}. {r['title']}\n{r['link']}\n\n"
+            spoken = f"Here are the top results for '{query}':\n\n"
+            for i, r in enumerate(results[:num_results], 1):
+                spoken += f"{i}. {r['title']}\n   {r['link']}\n\n"
+            
             spoken = sanitize_for_azure(spoken)
             session = getattr(context, 'session', None)
             if session:
@@ -1327,48 +1462,81 @@ async def wiki_lookup(context: RunContext, topic: str) -> str:
     Returns:
         str: A summary of the Wikipedia article or a fallback message
     """
+    # Ensure topic is a string
+    if not isinstance(topic, str):
+        topic = str(topic)
+        
     logging.info(f"[TOOL] wiki_lookup called for topic: {topic}")
+    
     try:
+        # Create a function to run in executor to avoid blocking
         def lookup_wiki():
-            page = wikipediaapi.Wikipedia(
+            # Create a single Wikipedia instance to reuse
+            wiki = wikipediaapi.Wikipedia(
                 language='en',
                 extract_format=wikipediaapi.ExtractFormat.WIKI,
                 user_agent='AIVoiceAssistant/1.0'
-            ).page(topic)
+            )
+            
+            # First try direct page lookup
+            page = wiki.page(topic)
+            
+            # If direct lookup fails, try opensearch
             if not page.exists():
-                search = wikipediaapi.Wikipedia(
-                    language='en',
-                    extract_format=wikipediaapi.ExtractFormat.WIKI,
-                    user_agent='AIVoiceAssistant/1.0'
-                ).opensearch(topic)
-                if search:
-                    page = wikipediaapi.Wikipedia(
-                        language='en',
-                        extract_format=wikipediaapi.ExtractFormat.WIKI,
-                        user_agent='AIVoiceAssistant/1.0'
-                    ).page(search[0])
+                try:
+                    search_results = wiki.opensearch(topic)
+                    if search_results and len(search_results) > 0:
+                        # Try the first suggestion
+                        page = wiki.page(search_results[0])
+                        logging.info(f"[TOOL] wiki_lookup used suggestion: {search_results[0]}")
+                except Exception as search_error:
+                    logging.error(f"[TOOL] wiki_lookup opensearch error: {search_error}")
+            
+            # If we found a page
             if page.exists():
-                summary = page.summary.split('\n\n')[:2]
-                summary = '\n\n'.join(summary)
-                words = summary.split()
-                if len(words) > 300:
-                    summary = ' '.join(words[:300]) + '...'
-                result = f"According to Wikipedia: {summary}"
-                return result
+                # Get the summary and format it
+                if page.summary:
+                    # Split by paragraphs and take first two
+                    summary = page.summary.split('\n\n')[:2]
+                    summary = '\n\n'.join(summary)
+                    
+                    # Limit to 300 words for readability
+                    words = summary.split()
+                    if len(words) > 300:
+                        summary = ' '.join(words[:300]) + '...'
+                    
+                    result = f"According to Wikipedia: {summary}\n\nSource: {page.fullurl}"
+                    return result
+                else:
+                    return f"I found a Wikipedia page about '{topic}', but it doesn't have a summary. You can view it at {page.fullurl}"
             else:
                 return f"I couldn't find a Wikipedia article about '{topic}'. Let me share what I know based on my training."
+        
+        # Run the lookup in a separate thread to avoid blocking
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lookup_wiki)
         result = sanitize_for_azure(result)
         logging.info(f"[TOOL] wiki_lookup result: {result}")
+        
+        # Handle session output for voice responses
         session = getattr(context, 'session', None)
         if session:
             await handle_tool_results(session, result)
             return "Here's what I found on Wikipedia. I'll read it to you."
+        
         return result
     except Exception as e:
         logging.error(f"[TOOL] wiki_lookup exception: {e}")
-        return sanitize_for_azure(f"I tried looking up '{topic}' on Wikipedia, but encountered a technical issue. Let me answer based on what I know.")
+        error_msg = f"I tried looking up '{topic}' on Wikipedia, but encountered a technical issue. Let me answer based on what I know."
+        error_msg = sanitize_for_azure(error_msg)
+        
+        # Handle session output for voice responses
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I couldn't find reliable information on Wikipedia. Let me tell you what I know."
+        
+        return error_msg
 
 @function_tool
 async def fallback_web_search(context: RunContext, query: str, num_results: int = 10) -> str:
@@ -1377,17 +1545,31 @@ async def fallback_web_search(context: RunContext, query: str, num_results: int 
     Args:
         context: The run context for the tool
         query: The search query
-        num_results: Number of results to return (1-10)
+        num_results: Number of results to return (1-20)
         
     Returns:
         str: Formatted search results with titles and URLs
     """
+    # Ensure query is a string
+    if not isinstance(query, str):
+        query = str(query)
+    
+    # Ensure num_results is an integer
+    if not isinstance(num_results, int):
+        try:
+            num_results = int(num_results)
+        except (ValueError, TypeError):
+            num_results = 10
+    
+    # Limit number of results to a reasonable range
+    num_results = max(1, min(num_results, 20))
+    
     # Define fallback search URLs
     SEARXNG_FALLBACK = "https://searx.be/search"
     SAPTI_FALLBACK = "https://search.sapti.me/search"
     FALLBACK_URL = "https://duckduckgo.com/"
     
-    logging.info(f"[TOOL] fallback_web_search called for query: {query}")
+    logging.info(f"[TOOL] fallback_web_search called for query: {query}, num_results: {num_results}")
     
     # Try Bing search first
     try:

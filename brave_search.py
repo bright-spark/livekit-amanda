@@ -1,121 +1,147 @@
 """
-Brave Search API client for livekit-amanda.
-This module provides functionality to search the web using Brave Search API.
+Brave Search API unified interface for livekit-amanda.
+
+This module provides a unified interface for both Web Search and AI Search 
+using the Brave Search API with separate API keys and rate limits for each.
 """
 
 import logging
 import aiohttp
 import json
 import os
+import asyncio
 from typing import List, Dict, Any, Optional, Union
 from urllib.parse import urlencode
 
-class BraveSearchClient:
-    """Client for interacting with Brave Search API."""
+# Import specialized search modules
+try:
+    from brave_web_search import web_search as brave_web_search, get_brave_web_search_client
+    HAS_WEB_SEARCH = True
+    logging.info("Brave Web Search module loaded successfully")
+except ImportError:
+    HAS_WEB_SEARCH = False
+    logging.warning("Brave Web Search module not available")
     
-    def __init__(self, api_key: Optional[str] = None):
-        """Initialize the Brave Search client.
-        
-        Args:
-            api_key: Brave Search API key. If not provided, will try to get from environment variable.
-        """
-        self.api_key = api_key or os.environ.get("BRAVE_API_KEY")
-        if not self.api_key:
-            logging.warning("No Brave API key provided. Please set BRAVE_API_KEY environment variable or pass it to the constructor.")
-        
-        self.base_url = "https://api.search.brave.com/res/v1/web/search"
-        self.headers = {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "X-Subscription-Token": self.api_key
-        }
-    
-    async def search(self, 
-                    query: str, 
-                    country: str = "us", 
-                    search_lang: str = "en", 
-                    ui_lang: str = "en-US", 
-                    count: int = 10, 
-                    offset: int = 0,
-                    safe_search: str = "moderate") -> Dict[str, Any]:
-        """Search the web using Brave Search API.
-        
-        Args:
-            query: Search query
-            country: Country code for search results
-            search_lang: Language code for search results
-            ui_lang: UI language code
-            count: Number of results to return (max 20)
-            offset: Offset for pagination
-            safe_search: Safe search level (strict, moderate, off)
-            
-        Returns:
-            Dict containing the search results
-        """
-        params = {
-            "q": query,
-            "country": country,
-            "search_lang": search_lang,
-            "ui_lang": ui_lang,
-            "count": min(count, 20),  # Brave API has a max of 20 results per request
-            "offset": offset,
-            "safesearch": safe_search
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(self.base_url, params=params, headers=self.headers) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logging.error(f"Brave Search API error: {response.status} - {error_text}")
-                        return {"error": f"API error: {response.status}", "details": error_text}
-                    
-                    return await response.json()
-        except Exception as e:
-            logging.error(f"Error during Brave search: {str(e)}")
-            return {"error": str(e)}
-    
-    def format_search_results(self, results: Dict[str, Any]) -> str:
-        """Format search results into a readable string.
-        
-        Args:
-            results: Search results from the Brave Search API
-            
-        Returns:
-            Formatted string of search results
-        """
-        if "error" in results:
-            return f"Search error: {results['error']}"
-        
-        if "web" not in results or "results" not in results["web"]:
-            return "No search results found."
-        
-        formatted = f"Found {len(results['web']['results'])} results:\n\n"
-        
-        for idx, result in enumerate(results["web"]["results"], 1):
-            title = result.get("title", "No title")
-            url = result.get("url", "")
-            description = result.get("description", "No description")
-            
-            formatted += f"{idx}. {title}\n"
-            formatted += f"URL: {url}\n"
-            formatted += f"Description: {description}\n\n"
-        
-        return formatted
+    # Define dummy function for when web search is not available
+    async def brave_web_search(*args, **kwargs):
+        return "Web search functionality not available"
 
-# Create a singleton instance
-_brave_search_client = None
+try:
+    from brave_ai_search import ai_search as brave_ai_search, get_brave_ai_search_client
+    HAS_AI_SEARCH = True
+    logging.info("Brave AI Search module loaded successfully")
+except ImportError:
+    HAS_AI_SEARCH = False
+    logging.warning("Brave AI Search module not available")
+    
+    # Define dummy function for when AI search is not available
+    async def brave_ai_search(*args, **kwargs):
+        return "AI search functionality not available"
 
-def get_brave_search_client(api_key: Optional[str] = None) -> BraveSearchClient:
-    """Get or create a singleton instance of the BraveSearchClient.
+# Import statistics tracking if available
+try:
+    from brave_search_stats import get_stats, get_stats_report
+    HAS_STATS_TRACKING = True
+    logging.info("Brave Search statistics tracking enabled")
+except ImportError:
+    HAS_STATS_TRACKING = False
+    logging.warning("Brave Search statistics tracking not available")
+    
+    # Define dummy functions for when stats module is not available
+    def get_stats():
+        return None
+        
+    def get_stats_report():
+        return "Statistics tracking not available"
+
+async def search(context, query, search_type: str = "web", num_results: int = 5) -> str:
+    """Unified search function that routes to the appropriate search type.
     
     Args:
-        api_key: Optional API key for Brave Search
+        context: The run context for the tool
+        query: The search query
+        search_type: Type of search to perform ("web" or "ai")
+        num_results: Number of results to return (for web search only)
         
     Returns:
-        BraveSearchClient instance
+        Formatted search results as a string
     """
-    global _brave_search_client
-    if _brave_search_client is None:
-        _brave_search_client = BraveSearchClient(api_key=api_key)
-    return _brave_search_client
+    # Ensure query is a string
+    if not isinstance(query, str):
+        query = str(query)
+    logging.info(f"[TOOL] brave_search called for query: {query}, type: {search_type}")
+    
+    # Log statistics if available
+    if HAS_STATS_TRACKING:
+        stats = get_stats()
+        if stats:
+            session_stats = stats.get_session_stats()
+            web_stats = stats.get_performance_stats("web")
+            ai_stats = stats.get_performance_stats("ai")
+            logging.info(f"[STATS] Web Search requests: {web_stats.get('total_requests', 0)}, AI Search requests: {ai_stats.get('total_requests', 0)}")
+    
+    # Route to the appropriate search function based on search_type
+    if search_type.lower() == "ai":
+        if not HAS_AI_SEARCH:
+            return "AI search functionality is not available. Please try web search instead."
+        
+        try:
+            return await brave_ai_search(context, query)
+        except Exception as e:
+            logging.error(f"Error during AI search: {str(e)}")
+            return f"An error occurred during AI search: {str(e)}"
+    else:  # Default to web search
+        if not HAS_WEB_SEARCH:
+            return "Web search functionality is not available."
+        
+        try:
+            return await brave_web_search(context, query, num_results=num_results)
+        except Exception as e:
+            logging.error(f"Error during web search: {str(e)}")
+            return f"An error occurred during web search: {str(e)}"
+
+async def web_search(context, query: str, num_results: int = 5) -> str:
+    """Perform a web search using the Brave Search API.
+    
+    Args:
+        context: The run context for the tool
+        query: The search query
+        num_results: Number of results to return
+        
+    Returns:
+        Formatted search results as a string
+    """
+    logging.info(f"[TOOL] brave_web_search called for query: {query}")
+    
+    if not HAS_WEB_SEARCH:
+        return "Web search functionality is not available."
+    
+    return await brave_web_search(context, query, num_results=num_results)
+
+async def ai_search(context, query: str) -> str:
+    """Perform an AI search using the Brave Search API.
+    
+    Args:
+        context: The run context for the tool
+        query: The search query
+        
+    Returns:
+        Formatted AI search results as a string
+    """
+    logging.info(f"[TOOL] brave_ai_search called for query: {query}")
+    
+    if not HAS_AI_SEARCH:
+        return "AI search functionality is not available."
+    
+    return await brave_ai_search(context, query)
+
+async def get_search_stats() -> str:
+    """Get statistics about Brave Search API usage.
+    
+    Returns:
+        Formatted statistics report as a string
+    """
+    if not HAS_STATS_TRACKING:
+        return "Statistics tracking is not available."
+    
+    return get_stats_report()

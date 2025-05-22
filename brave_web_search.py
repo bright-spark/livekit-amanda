@@ -1,10 +1,11 @@
 """
-Brave Search API implementation optimized for free tier usage.
+Brave Web Search API implementation.
+
 This module provides web search functionality using the Brave Search API with:
-1. Aggressive caching to minimize API calls
-2. Strict rate limiting (1 request per second for free tier)
-3. Query preprocessing to improve cache hit rates
-4. Persistent disk caching for results
+1. Configurable caching
+2. Configurable rate limiting
+3. Statistics tracking
+4. Web-specific response formatting
 """
 
 import logging
@@ -21,13 +22,32 @@ from urllib.parse import urlencode
 import aiohttp
 from dotenv import load_dotenv
 
+# Import statistics tracking module
+try:
+    from brave_search_stats import record_request, get_stats, get_stats_report
+    HAS_STATS_TRACKING = True
+    logging.info("Brave Search statistics tracking enabled")
+except ImportError:
+    HAS_STATS_TRACKING = False
+    logging.warning("Brave Search statistics tracking not available")
+    
+    # Define dummy functions for when stats module is not available
+    def record_request(*args, **kwargs):
+        pass
+        
+    def get_stats():
+        return None
+        
+    def get_stats_report():
+        return "Statistics tracking not available"
+
 # Load environment variables
 load_dotenv()
 
 # Get configuration from environment variables
 ENABLE_CACHE = os.environ.get("BRAVE_SEARCH_ENABLE_CACHE", "true").lower() == "true"
 ENABLE_PERSISTENCE = os.environ.get("BRAVE_SEARCH_ENABLE_PERSISTENCE", "true").lower() == "true"
-RATE_LIMIT = int(os.environ.get("BRAVE_SEARCH_RATE_LIMIT", "1"))
+WEB_RATE_LIMIT = int(os.environ.get("BRAVE_WEB_SEARCH_RATE_LIMIT", "1"))
 
 # Configure logging
 logging.basicConfig(
@@ -374,8 +394,8 @@ class FreeTierCache:
         
         return stats
 
-class ConfigurableRateLimiter:
-    """Configurable rate limiter for Brave Search API.
+class WebSearchRateLimiter:
+    """Configurable rate limiter for Brave Web Search API.
     
     Can be configured for free tier (1 request per second) or paid tier (20 requests per second).
     """
@@ -400,13 +420,24 @@ class ConfigurableRateLimiter:
         if time_since_last_request < self.min_interval:
             wait_time = self.min_interval - time_since_last_request
             logging.info(f"Rate limiting: waiting for {wait_time:.2f} seconds")
+            
+            # Record rate limiting statistics
+            if HAS_STATS_TRACKING:
+                record_request(
+                    query="",  # No specific query for this record
+                    response_time=0.0,  # Not applicable
+                    search_type="web",  # Web search
+                    rate_limited=True,
+                    delay_time=wait_time
+                )
+                
             await asyncio.sleep(wait_time)
         
         # Update the last request time after waiting
         self.last_request_time = time.time()
 
-class BraveSearchOptimized:
-    """Brave Search API client with configurable optimizations."""
+class BraveWebSearch:
+    """Brave Web Search API client with configurable optimizations."""
     
     def __init__(self, 
                  api_key: Optional[str] = None,
@@ -422,9 +453,9 @@ class BraveSearchOptimized:
             rate_limit: Requests per second (1 for free tier, 20 for paid tier). If None, uses the BRAVE_SEARCH_RATE_LIMIT env var.
         """
         # Get API key from environment variable if not provided
-        self.api_key = api_key or os.environ.get("BRAVE_WEB_SEARCH_API_KEY") or os.environ.get("BRAVE_API_KEY")
+        self.api_key = api_key or os.environ.get("BRAVE_WEB_SEARCH_API_KEY")
         if not self.api_key:
-            logging.warning("Brave Search API key not provided and not found in environment variables (BRAVE_WEB_SEARCH_API_KEY or BRAVE_API_KEY)")
+            logging.warning("Brave Web Search API key not provided and not found in environment variables")
         
         # API configuration
         self.base_url = "https://api.search.brave.com/res/v1/web/search"
@@ -437,9 +468,9 @@ class BraveSearchOptimized:
         # Use provided values or fall back to environment variables
         self.enable_cache = enable_cache if enable_cache is not None else ENABLE_CACHE
         self.enable_persistence = enable_persistence if enable_persistence is not None else ENABLE_PERSISTENCE
-        self.rate_limit_value = rate_limit if rate_limit is not None else RATE_LIMIT
+        self.rate_limit_value = rate_limit if rate_limit is not None else WEB_RATE_LIMIT
         
-        logging.info(f"Brave Search API configuration: cache={self.enable_cache}, persistence={self.enable_persistence}, rate_limit={self.rate_limit_value}")
+        logging.info(f"Brave Web Search API configuration: cache={self.enable_cache}, persistence={self.enable_persistence}, rate_limit={self.rate_limit_value}")
         
         # Initialize cache if enabled
         if self.enable_cache:
@@ -448,14 +479,14 @@ class BraveSearchOptimized:
                 memory_cache_size=1000,
                 disk_cache_dir=None if not self.enable_persistence else None  # Use default if persistence enabled
             )
-            logging.info("Brave Search cache enabled")
+            logging.info("Brave Web Search cache enabled")
         else:
             self.cache = None
-            logging.info("Brave Search cache disabled")
+            logging.info("Brave Web Search cache disabled")
         
         # Initialize rate limiter
-        self.rate_limiter = ConfigurableRateLimiter(requests_per_second=self.rate_limit_value)
-        logging.info(f"Brave Search rate limiter configured for {self.rate_limit_value} requests per second")
+        self.rate_limiter = WebSearchRateLimiter(requests_per_second=self.rate_limit_value)
+        logging.info(f"Brave Web Search rate limiter configured for {self.rate_limit_value} requests per second")
         
         # Connection pool for reusing connections
         self.session = None
@@ -495,7 +526,7 @@ class BraveSearchOptimized:
                     offset: int = 0,
                     safe_search: str = "moderate",
                     use_cache: bool = True) -> Dict[str, Any]:
-        """Search the web using Brave Search API with aggressive caching and strict rate limiting.
+        """Search the web using Brave Web Search API with configurable optimizations.
         
         Args:
             query: Search query
@@ -510,10 +541,14 @@ class BraveSearchOptimized:
         Returns:
             Dict containing the search results
         """
-        # Check if API key is available
-        if not self.api_key:
-            return {"error": "Brave Search API key is missing. Please set BRAVE_WEB_SEARCH_API_KEY in your .env file."}
-            
+        # Initialize statistics tracking variables
+        start_time = time.time()
+        cache_hit = False
+        error = False
+        rate_limited = False
+        delay_time = 0.0
+        status_code = 200
+        result_count = 0
         # Normalize the query to improve cache hit rate
         normalized_query = " ".join(query.lower().split())
         
@@ -534,28 +569,104 @@ class BraveSearchOptimized:
         if use_cache:
             cached_result = await self.cache.get(cache_key)
             if cached_result:
+                cache_hit = True
                 logging.info(f"Cache hit for query: {normalized_query}")
+                
+                # Record cache hit statistics
+                if HAS_STATS_TRACKING:
+                    # Count results if available
+                    if "web" in cached_result and "results" in cached_result["web"]:
+                        result_count = len(cached_result["web"]["results"])
+                    
+                    response_time = time.time() - start_time
+                    record_request(
+                        query=normalized_query,
+                        response_time=response_time,
+                        search_type="web",  # Web search
+                        cache_hit=True,
+                        result_count=result_count
+                    )
+                
                 return cached_result
         
         # Wait if necessary to comply with rate limits
+        rate_limit_start = time.time()
         await self.rate_limiter.wait_if_needed()
+        rate_limited = (time.time() - rate_limit_start) > 0.01  # If we waited more than 10ms
+        delay_time = time.time() - rate_limit_start if rate_limited else 0
         
         # Make the API request
         try:
             session = await self.get_session()
             
             async with session.get(self.base_url, params=params) as response:
+                status_code = response.status
+                
                 if response.status == 429:
                     # Rate limit hit
+                    rate_limited = True
+                    error = True
                     error_msg = await response.text()
                     logging.error(f"Rate limit exceeded: {error_msg}")
+                    
+                    # Record rate limit error statistics
+                    if HAS_STATS_TRACKING:
+                        response_time = time.time() - start_time
+                        record_request(
+                            query=normalized_query,
+                            response_time=response_time,
+                            search_type="web",  # Web search
+                            cache_hit=False,
+                            error=True,
+                            rate_limited=True,
+                            delay_time=delay_time,
+                            status_code=429,
+                            result_count=0
+                        )
+                    
                     return {"error": "Rate limit exceeded", "details": error_msg}
                 elif response.status != 200:
+                    error = True
                     error_text = await response.text()
                     logging.error(f"Brave Search API error: {response.status} - {error_text}")
+                    
+                    # Record API error statistics
+                    if HAS_STATS_TRACKING:
+                        response_time = time.time() - start_time
+                        record_request(
+                            query=normalized_query,
+                            response_time=response_time,
+                            search_type="web",  # Web search
+                            cache_hit=False,
+                            error=True,
+                            rate_limited=rate_limited,
+                            delay_time=delay_time,
+                            status_code=response.status,
+                            result_count=0
+                        )
+                    
                     return {"error": f"API error: {response.status}", "details": error_text}
                 
                 result = await response.json()
+                
+                # Count results if available
+                if "web" in result and "results" in result["web"]:
+                    result_count = len(result["web"]["results"])
+                
+                # Record successful API request statistics
+                if HAS_STATS_TRACKING:
+                    response_time = time.time() - start_time
+                    record_request(
+                        query=normalized_query,
+                        response_time=response_time,
+                        search_type="web",  # Web search
+                        cache_hit=False,
+                        error=False,
+                        rate_limited=rate_limited,
+                        delay_time=delay_time,
+                        status_code=status_code,
+                        result_count=result_count
+                    )
                 
                 # Cache the result if use_cache is True
                 if use_cache:
@@ -563,11 +674,46 @@ class BraveSearchOptimized:
                 
                 return result
         except asyncio.TimeoutError:
+            error = True
             logging.error("Request timed out")
+            
+            # Record timeout error statistics
+            if HAS_STATS_TRACKING:
+                response_time = time.time() - start_time
+                record_request(
+                    query=normalized_query,
+                    response_time=response_time,
+                    search_type="web",  # Web search
+                    cache_hit=False,
+                    error=True,
+                    rate_limited=rate_limited,
+                    delay_time=delay_time,
+                    status_code=0,  # Timeout
+                    result_count=0
+                )
+            
             return {"error": "Request timed out"}
         except Exception as e:
-            logging.error(f"Error during Brave search: {str(e)}")
-            return {"error": str(e)}
+            error = True
+            error_msg = str(e)
+            logging.error(f"Error during Brave search: {error_msg}")
+            
+            # Record general error statistics
+            if HAS_STATS_TRACKING:
+                response_time = time.time() - start_time
+                record_request(
+                    query=normalized_query,
+                    response_time=response_time,
+                    search_type="web",  # Web search
+                    cache_hit=False,
+                    error=True,
+                    rate_limited=rate_limited,
+                    delay_time=delay_time,
+                    status_code=0,  # General error
+                    result_count=0
+                )
+            
+            return {"error": error_msg}
     
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics.
@@ -582,37 +728,33 @@ class BraveSearchOptimized:
         self.cache.clear()
         logging.info("Brave Search cache cleared")
     
-    async def shutdown(self) -> None:
-        """Shutdown the client and release resources."""
-        if self.session and not self.session.closed:
-            await self.session.close()
-            self.session = None
-            logging.info("Brave Search client session closed")
-
     async def close(self) -> None:
         """Close the client and release resources."""
-        await self.shutdown()
+        async with self.session_lock:
+            if self.session and not self.session.closed:
+                await self.session.close()
+                self.session = None
 
 # Create a singleton instance
-_brave_search_free_tier = None
+_brave_web_search = None
 _client_lock = asyncio.Lock()
 
-async def get_brave_search_client(api_key: Optional[str] = None) -> BraveSearchOptimized:
-    """Get or create a singleton instance of the BraveSearchOptimized.
+async def get_brave_web_search_client(api_key: Optional[str] = None) -> BraveWebSearch:
+    """Get or create a singleton instance of the BraveWebSearch.
     
     Args:
-        api_key: Optional API key for Brave Search
+        api_key: Optional API key for Brave Web Search
         
     Returns:
-        BraveSearchOptimized instance
+        BraveWebSearch instance
     """
-    global _brave_search_free_tier
+    global _brave_web_search
     
     async with _client_lock:
-        if _brave_search_free_tier is None:
-            _brave_search_free_tier = BraveSearchOptimized(api_key=api_key)
+        if _brave_web_search is None:
+            _brave_web_search = BraveWebSearch(api_key=api_key)
     
-    return _brave_search_free_tier
+    return _brave_web_search
 
 def format_search_results(results: Dict[str, Any], num_results: int = 5) -> str:
     """Format search results into a readable string with grounding information.
@@ -759,27 +901,23 @@ async def web_search(context, query, num_results: int = 5) -> str:
     Returns:
         Formatted search results as a string
     """
-    # Fix parameter order if they're swapped (handle the case where query is an int and num_results is a string)
-    if isinstance(query, int) and isinstance(num_results, str):
-        query, num_results = num_results, query
-    
     # Ensure query is a string
     if not isinstance(query, str):
         query = str(query)
-        
-    # Ensure num_results is an integer
-    if not isinstance(num_results, int):
-        try:
-            num_results = int(num_results)
-        except (ValueError, TypeError):
-            num_results = 5  # Default to 5 results if conversion fails
     start_time = time.time()
-    logging.info(f"[TOOL] web_search called for query: {query}, num_results: {num_results}")
+    logging.info(f"[TOOL] brave_web_search called for query: {query}, num_results: {num_results}")
     
-    client = None
+    # Log statistics if available
+    if HAS_STATS_TRACKING:
+        stats = get_stats()
+        if stats:
+            session_stats = stats.get_session_stats()
+            web_stats = stats.get_performance_stats("web")
+            logging.info(f"[STATS] Web Search requests: {web_stats.get('total_requests', 0)}, Cache hit rate: {web_stats.get('cache_hit_rate', 0):.2f}%")
+    
     try:
-        # Get the singleton client instance
-        client = await get_brave_search_client()
+        # Get the Brave Web Search client
+        client = await get_brave_web_search_client()
         
         # Check session cache first if caching is enabled
         if client.enable_cache:
@@ -789,7 +927,7 @@ async def web_search(context, query, num_results: int = 5) -> str:
                 formatted_results = _session_cache[cache_key]
                 # Log performance
                 elapsed = time.time() - start_time
-                logging.info(f"[PERFORMANCE] web_search completed in {elapsed:.4f}s (session cache hit)")
+                logging.info(f"[PERFORMANCE] brave_web_search completed in {elapsed:.4f}s (session cache hit)")
                 return formatted_results
         
         # Get the Brave Search client (use the one we already created)
@@ -850,17 +988,13 @@ async def web_search(context, query, num_results: int = 5) -> str:
         
         # Log performance
         elapsed = time.time() - start_time
-        logging.info(f"[PERFORMANCE] web_search completed in {elapsed:.4f}s")
+        logging.info(f"[PERFORMANCE] brave_web_search completed in {elapsed:.4f}s")
         
         return formatted_results
         
     except Exception as e:
         logging.error(f"[TOOL] web_search exception: {e}")
         return f"I couldn't find any results for '{query}'. Try a different query."
-    finally:
-        # We don't close the client here since it's a singleton that's reused
-        # The session will be properly closed when the application shuts down
-        pass
 
 async def get_cache_stats() -> Dict[str, Any]:
     """Get comprehensive cache statistics.
@@ -890,34 +1024,6 @@ async def clear_session_cache() -> None:
     _session_cache = {}
     logging.info("Session cache cleared")
 
-# Register cleanup handler for proper resource management
-async def cleanup_resources():
-    """Clean up all resources when the application is shutting down."""
-    try:
-        if _brave_search_free_tier is not None:
-            await _brave_search_free_tier.shutdown()
-            logging.info("Brave Search resources cleaned up successfully")
-    except Exception as e:
-        logging.error(f"Error during resource cleanup: {e}")
-
-# Register the cleanup handler with atexit
-import atexit
-import asyncio
-
-def sync_cleanup():
-    """Synchronous wrapper for the async cleanup function."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(cleanup_resources())
-        else:
-            loop.run_until_complete(cleanup_resources())
-    except Exception as e:
-        logging.error(f"Error during sync cleanup: {e}")
-
-# Register the cleanup handler
-atexit.register(sync_cleanup)
-
 async def main():
     """Run a simple test of the Brave Search free tier client."""
     # Check if API key is set
@@ -938,25 +1044,25 @@ async def main():
         "artificial intelligence"
     ]
     
-    try:
-        # Run searches
-        for query in queries:
-            print(f"\nSearching for: {query}")
-            start_time = time.time()
-            results = await web_search(query, num_results=3)
-            elapsed = time.time() - start_time
-            print(f"Search completed in {elapsed:.4f} seconds")
-            print(results)
-            
-            # Wait a bit between queries to demonstrate rate limiting
-            await asyncio.sleep(0.5)
+    # Run searches
+    for query in queries:
+        print(f"\nSearching for: {query}")
+        start_time = time.time()
+        results = await web_search(query, num_results=3)
+        elapsed = time.time() - start_time
+        print(f"Search completed in {elapsed:.4f} seconds")
+        print(results)
         
-        # Get cache statistics
-        stats = await get_cache_stats()
-        print(f"\nCache statistics: {stats}")
-    finally:
-        # Ensure resources are cleaned up
-        await cleanup_resources()
+        # Wait a bit between queries to demonstrate rate limiting
+        await asyncio.sleep(0.5)
+    
+    # Get cache statistics
+    stats = await get_cache_stats()
+    print(f"\nCache statistics: {stats}")
+    
+    # Close client
+    client = await get_brave_search_client()
+    await client.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

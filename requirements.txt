@@ -33,4 +33,5 @@ geopy
 
 # Search and information retrieval
 wikipedia-api
+duckduckgo3
 googlesearch-python

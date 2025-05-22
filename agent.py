@@ -252,13 +252,13 @@ class FunctionAgent(Agent):
                 You are Amanda, an advanced AI assistant with access to a comprehensive set of tools and capabilities.
                 Your primary goal is to be helpful, informative, and efficient in your responses.
                 
-                IMPORTANT: Today's date is {current_date}. Your training data only includes information up to August 2024.
-                For any questions about events, developments, or information after August 2024, you MUST use web search tools
+                IMPORTANT: It is {current_date} now. Your own data only includes information up to August 2024.
+                For any questions about people, events, developments, or any information after August 2024, you MUST use web search tools
                 to provide accurate and up-to-date information. Never rely solely on your training data for time-sensitive questions.
                 
                 TIME-SENSITIVE QUERY PROTOCOL:
                 1. IDENTIFY: Recognize when a query relates to events, people, products, or information that may have changed after August 2024
-                2. SEARCH FIRST: For such queries, ALWAYS use web_search(), google_search(), or get_news() BEFORE responding
+                2. SEARCH FIRST: For such queries, ALWAYS use web_search() BEFORE responding
                 3. VERIFY: Cross-check information from multiple web sources when possible
                 4. CITE SOURCES: Always mention the sources of your information
                 5. BE TRANSPARENT: If search tools fail, clearly state that you cannot provide up-to-date information
@@ -349,16 +349,15 @@ class FunctionAgent(Agent):
                 api_version=os.environ["AZURE_OPENAI_VERSION"],
                 temperature=0.3,  # Lower temperature for more focused and consistent responses
                 parallel_tool_calls=True,
-                # Removed tool_choice parameter to fix API error
             ),
             tts=azure.TTS(
                 speech_key=os.environ["AZURE_TTS_API_KEY"],
                 speech_region=os.environ["AZURE_TTS_REGION"]
             ),
             vad=silero.VAD.load(
-                activation_threshold=0.4,  # Slightly lower threshold for better voice detection
-                min_speech_duration=0.15,  # Shorter minimum speech duration (in seconds)
-                min_silence_duration=0.5,  # Shorter silence duration for quicker response (in seconds)
+                activation_threshold=0.7,  # Slightly lower threshold for better voice detection
+                min_speech_duration=0.2,  # Shorter minimum speech duration (in seconds)
+                min_silence_duration=0.2,  # Shorter silence duration for quicker response (in seconds)
                 sample_rate=16000,  # Explicitly set sample rate
                 force_cpu=True,  # Use CPU for better stability
                 prefix_padding_duration=0.3  # Add small padding before speech
@@ -368,28 +367,30 @@ class FunctionAgent(Agent):
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         """Override the llm_node to say a message when a tool call is detected."""
-        activity = self._activity
         tool_call_detected = False
 
-        # Get the original response from the parent class
         async for chunk in super().llm_node(chat_ctx, tools, model_settings):
-            # Check if this chunk contains a tool call
             if isinstance(chunk, ChatChunk) and chunk.delta and chunk.delta.tool_calls and not tool_call_detected:
-                # Say the checking message only once when we detect the first tool call
                 tool_call_detected = True
-                # Use the chat context to send a text response that will be spoken
                 chat_ctx.add_message(role="assistant", content="Sure, I'll check that for you.")
 
             yield chunk
 
-# Try to import optimized Brave Search API implementations first
+# Try to import the fallback search system first
 try:
-    # Import the module itself to access configuration
+    from fallback_search_system import unified_web_search, fallback_search
+    HAS_FALLBACK_SEARCH = True
+    logging.info("Using unified fallback search system with multiple search engines")
+except ImportError:
+    HAS_FALLBACK_SEARCH = False
+    logging.warning("Fallback search system not available, will try individual search methods")
+
+# Try to import optimized Brave Search API implementations
+try:
     import brave_search_free_tier
     from brave_search_free_tier import web_search as brave_web_search
     from brave_search_free_tier import get_cache_stats as brave_get_cache_stats
     
-    # Get configuration from environment variables
     BRAVE_SEARCH_ENABLE_CACHE = os.environ.get("BRAVE_SEARCH_ENABLE_CACHE", "true").lower() == "true"
     BRAVE_SEARCH_ENABLE_PERSISTENCE = os.environ.get("BRAVE_SEARCH_ENABLE_PERSISTENCE", "true").lower() == "true"
     BRAVE_SEARCH_RATE_LIMIT = int(os.environ.get("BRAVE_SEARCH_RATE_LIMIT", "1"))
@@ -400,10 +401,17 @@ except ImportError:
     HAS_BRAVE_SEARCH = False
     logging.warning("Brave Search implementation not available, will use fallback")
 
+# Try to import DuckDuckGo Search
+try:
+    from duckduckgo_search import ddg_web_search
+    HAS_DUCKDUCKGO = True
+    logging.info("DuckDuckGo Search available as fallback")
+except ImportError:
+    HAS_DUCKDUCKGO = False
+    logging.warning("DuckDuckGo Search not available")
+
 # Import tools and functions from tools.py
-# First import the common tools that are always needed
 from tools import (
-    # Tool functions
     get_current_time,
     get_current_date,
     get_current_date_and_timezone,
@@ -420,8 +428,6 @@ from tools import (
     google_search,
     wikipedia_search,
     wiki_lookup,
-    
-    # Utility functions
     sanitize_for_azure,
     clean_spoken,
     handle_tool_results,
@@ -458,15 +464,12 @@ class AIVoiceAssistant:
             cls._instance.vad = None
             cls._instance.session = None
             cls._instance.agent = None
-            # Initialize Wikipedia API
             cls._instance.wiki_wiki = wikipediaapi.Wikipedia(
                 language='en',
                 extract_format=wikipediaapi.ExtractFormat.WIKI,
                 user_agent='AIVoiceAssistant/1.0'
             )
-            # Initialize geocoder with a user agent for weather and location services
             cls._instance.geolocator = Nominatim(user_agent="AIVoiceAssistant/1.0")
-            # Cache dictionaries
             cls._instance.weather_cache = {}  # Cache weather data
             cls._instance.wiki_cache = {}     # Cache wikipedia lookups
             cls._instance.news_cache = {}     # Cache news lookups
@@ -511,7 +514,6 @@ class AIVoiceAssistant:
                     azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
                     api_version=os.environ["AZURE_OPENAI_VERSION"],
                     temperature=0.7,
-                    # No parallel_tool_calls to avoid errors
                     tool_choice="auto",
                     timeout=httpx.Timeout(connect=15.0, read=10.0, write=5.0, pool=5.0),
                 ),
@@ -529,22 +531,17 @@ class AIVoiceAssistant:
             self.vad = None
             self.session = None
             self.agent = None
-            # Initialize Wikipedia API
             self.wiki_wiki = wikipediaapi.Wikipedia(
                 language='en',
                 extract_format=wikipediaapi.ExtractFormat.WIKI,
                 user_agent='AIVoiceAssistant/1.0'
             )
-            # Initialize geocoder
             self.geolocator = Nominatim(user_agent="AIVoiceAssistant/1.0")
-            # Cache dictionaries
             self.weather_cache = {}
             self.wiki_cache = {}
             self.news_cache = {}
             self.crawl_cache = {}
-            # Store cookies between requests
             self.cookies = {}
-            # Default headers for HTTP requests
             self.default_headers = {
                 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -583,15 +580,57 @@ class AIVoiceAssistant:
 
 async def entrypoint(ctx: JobContext):
     """Main entrypoint for the LiveKit agent application."""
-    # Create the agent first
     agent = FunctionAgent()
     
-    # Define web search tools based on availability
     web_search_tools = []
-    if HAS_BRAVE_SEARCH:
-        # Create a function_tool wrapper for the Brave Search implementation
-        from livekit.agents import function_tool
+    from livekit.agents import function_tool
+    
+    # Define the web_search function based on available search methods
+    if HAS_FALLBACK_SEARCH:
+        # Use the unified fallback search system
+        @function_tool
+        async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
+            """Search the web for information using multiple search engines with automatic fallback.
+            
+            Args:
+                context: The run context for the tool
+                query: The search query
+                num_results: Number of results to return (1-10)
+                
+            Returns:
+                str: Formatted search results with titles and URLs
+            """
+            try:
+                if not isinstance(query, str):
+                    query = str(query)
+                results = await unified_web_search(context, query, num_results)
+                return results
+            except Exception as e:
+                logging.error(f"Error in web_search using unified fallback system: {e}")
+                error_msg = f"I couldn't find any results for '{query}'. Try a different query."
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, error_msg)
+                    return "I couldn't find any results for your search."
+                return error_msg
         
+        @function_tool
+        async def fallback_web_search(context: RunContext, query: str, num_results: int = 10) -> str:
+            """Alternative search when primary methods fail, using multiple search engines.
+            
+            Args:
+                context: The run context for the tool
+                query: The search query
+                num_results: Number of results to return (1-20)
+                
+            Returns:
+                str: Formatted search results with titles and URLs
+            """
+            # Use more results for fallback search
+            return await web_search(context, query, max(num_results, 10))
+    
+    elif HAS_BRAVE_SEARCH:
+        # Use Brave Search API if available
         @function_tool
         async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
             """Search the web for information using optimized Brave Search API.
@@ -605,31 +644,39 @@ async def entrypoint(ctx: JobContext):
                 str: Formatted search results with titles and URLs
             """
             try:
-                # Call the optimized Brave Search implementation
+                if not isinstance(query, str):
+                    query = str(query)
                 results = await brave_web_search(query, num_results)
-                
-                # Handle session output for voice responses if needed
                 session = getattr(context, 'session', None)
                 if session:
                     await handle_tool_results(session, results)
                     return "I've found some results and will read them to you now."
-                
                 return results
             except Exception as e:
                 logging.error(f"Error in web_search using Brave Search API: {e}")
-                error_msg = f"I couldn't find any results for '{query}'. Try a different query."
+                # Try DuckDuckGo as fallback if available
+                if HAS_DUCKDUCKGO:
+                    try:
+                        logging.info(f"Trying DuckDuckGo fallback for query: '{query}'")
+                        results = await ddg_web_search(query, num_results)
+                        session = getattr(context, 'session', None)
+                        if session:
+                            await handle_tool_results(session, results)
+                            return "I've found some results using DuckDuckGo and will read them to you now."
+                        return results
+                    except Exception as ddg_error:
+                        logging.error(f"Error in DuckDuckGo fallback: {ddg_error}")
                 
-                # Handle session output for voice responses
+                error_msg = f"I couldn't find any results for '{query}'. Try a different query."
                 session = getattr(context, 'session', None)
                 if session:
                     await handle_tool_results(session, error_msg)
                     return "I couldn't find any results for your search."
-                
                 return error_msg
         
         @function_tool
         async def fallback_web_search(context: RunContext, query: str, num_results: int = 10) -> str:
-            """Alternative search when primary methods fail, using Brave Search API.
+            """Alternative search when primary methods fail, using DuckDuckGo or other sources.
             
             Args:
                 context: The run context for the tool
@@ -639,13 +686,68 @@ async def entrypoint(ctx: JobContext):
             Returns:
                 str: Formatted search results with titles and URLs
             """
-            # Just use the regular web_search since we're using Brave API for both
-            return await web_search(context, query, num_results)
+            if HAS_DUCKDUCKGO:
+                try:
+                    results = await ddg_web_search(query, num_results)
+                    session = getattr(context, 'session', None)
+                    if session:
+                        await handle_tool_results(session, results)
+                        return "I've found some results using DuckDuckGo and will read them to you now."
+                    return results
+                except Exception as e:
+                    logging.error(f"Error in fallback_web_search using DuckDuckGo: {e}")
             
-        web_search_tools = [web_search, fallback_web_search]
+            # If DuckDuckGo fails or is not available, try Brave as a last resort
+            return await web_search(context, query, num_results)
+    
     else:
-        # Use the original tools.py implementations
-        web_search_tools = [web_search, fallback_web_search]
+        # Use the original tools.py implementations if no specialized search is available
+        @function_tool
+        async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
+            """Search the web for information.
+            
+            Args:
+                context: The run context for the tool
+                query: The search query
+                num_results: Number of results to return (1-10)
+                
+            Returns:
+                str: Formatted search results with titles and URLs
+            """
+            # Try DuckDuckGo first if available
+            if HAS_DUCKDUCKGO:
+                try:
+                    results = await ddg_web_search(query, num_results)
+                    session = getattr(context, 'session', None)
+                    if session:
+                        await handle_tool_results(session, results)
+                        return "I've found some results using DuckDuckGo and will read them to you now."
+                    return results
+                except Exception as e:
+                    logging.error(f"Error in web_search using DuckDuckGo: {e}")
+            
+            # Fall back to tools.py implementation
+            from tools import web_search as tools_web_search
+            return await tools_web_search(context, query)
+        
+        @function_tool
+        async def fallback_web_search(context: RunContext, query: str, num_results: int = 10) -> str:
+            """Alternative search when primary methods fail.
+            
+            Args:
+                context: The run context for the tool
+                query: The search query
+                num_results: Number of results to return (1-20)
+                
+            Returns:
+                str: Formatted search results with titles and URLs
+            """
+            # Try tools.py implementation
+            from tools import fallback_web_search as tools_fallback_web_search
+            return await tools_fallback_web_search(context, query, num_results)
+    
+    # Add the web search tools to the list
+    web_search_tools = [web_search, fallback_web_search]
     
     # Register all the tools with the agent
     tools_to_register = [
@@ -658,10 +760,8 @@ async def entrypoint(ctx: JobContext):
         get_weather,
         get_news,
         
-        # Math calculation tools
+        # Math calculation tool (merged)
         calculate,
-        calculate_math,
-        evaluate_expression,
         
         # Fun content tools
         get_fun_content,
@@ -682,61 +782,51 @@ async def entrypoint(ctx: JobContext):
         search_locanto,
     ]
     
-    # Add web_search and fallback_web_search based on availability
     if HAS_BRAVE_SEARCH:
-        # Add the Brave Search API implementations
         tools_to_register.append(web_search)
         tools_to_register.append(fallback_web_search)
     else:
-        # Add the original tools.py implementations
         tools_to_register.append(web_search)
         tools_to_register.append(fallback_web_search)
     
-    # Add Locanto tools if available
     if HAS_LOCANTO_UTILS:
         tools_to_register.append(basic_search_locanto)
         tools_to_register.append(show_top_locanto_categories_and_tags)
     
-    # Register all tools with the agent
-    await agent.register_tools(*tools_to_register)
+    if hasattr(agent, '_tools') and isinstance(agent._tools, list):
+        agent._tools.extend(tools_to_register)
+        logging.info(f"Added {len(tools_to_register)} tools to agent")
     logging.info(f"Registered {len(tools_to_register)} local tools with agent")
     
     logging.info("Created agent with local tools")
     
-    # Track available tool sources for user feedback
     tool_sources = ["Local"]
     
-    # Check if ZAPIER_MCP_URL is set and add MCP tools if available
     zapier_mcp_url = os.environ.get("ZAPIER_MCP_URL")
     if zapier_mcp_url and zapier_mcp_url.strip():
         logging.info(f"Found Zapier MCP URL, attempting to connect")
         try:
-            # Create MCP server
             mcp_server = MCPServerSse(
                 params={"url": zapier_mcp_url},
                 cache_tools_list=True,
                 name="Zapier MCP Server"
             )
             
-            # Connect to the server first to validate the connection
             await mcp_server.connect()
             
-            # List available tools for logging purposes
             available_tools = await mcp_server.list_tools()
             logging.info(f"Found {len(available_tools)} tools on Zapier MCP server")
             
             if available_tools:
-                # Register MCP tools with the agent
                 mcp_tools = await MCPToolsIntegration.register_with_agent(
                     agent=agent,
                     mcp_servers=[mcp_server],
                     convert_schemas_to_strict=True,
-                    auto_connect=False  # Already connected above
+                    auto_connect=False
                 )
                 logging.info(f"Successfully registered {len(mcp_tools)} MCP tools from Zapier")
                 tool_sources.append("Zapier MCP")
                 
-                # Log the names of registered tools for debugging
                 tool_names = [getattr(t, '__name__', str(t)) for t in mcp_tools]
                 logging.info(f"Registered MCP tool names: {', '.join(tool_names)}")
             else:
@@ -750,22 +840,19 @@ async def entrypoint(ctx: JobContext):
         
     logging.info(f"Agent initialized with tools from: {', '.join(tool_sources)}")
     
-    # Add a note about available tool sources to the agent instructions
     tool_sources_str = ", ".join(tool_sources)
     
-    # Add a special instruction to the agent to prioritize web search tools
     current_date = datetime.now().strftime("%Y-%m-%d")
     
-    # Add information about Brave Search API if available
     brave_info = ""
     if HAS_BRAVE_SEARCH:
-        brave_info = "\n        You are using the optimized Brave Search API for web searches, which is highly efficient with caching."
+        brave_info = "\n    You are using the optimized Brave Search API for web searches, which is highly efficient with caching."
     
     instructions = f"""
         You are Amanda, an advanced AI assistant with access to a comprehensive set of tools and capabilities.
         Your primary goal is to be helpful, informative, and efficient in your responses.
         
-        Today's date is {current_date}.{brave_info}
+        It is now {current_date}.{brave_info}
         
         IMPORTANT: When asked to search for information or look something up, ALWAYS use the web_search, 
         google_search, or wikipedia_search tools. These are the most reliable tools for finding information.
@@ -783,7 +870,6 @@ async def entrypoint(ctx: JobContext):
         - External tools (if Zapier MCP is available)
     """
     
-    # Properly await the instructions update
     await agent.update_instructions(instructions)
     
     logging.info("Updated agent instructions to prioritize web search tools")
