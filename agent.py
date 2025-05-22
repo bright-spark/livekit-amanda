@@ -33,7 +33,7 @@ from geopy.geocoders import Nominatim
 from lxml_html_clean import Cleaner
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
-from googlesearch import search as google_search
+from googlesearch.googlesearch import GoogleSearch
 
 # Local imports
 # Import Locanto module with Brave Search API integration
@@ -197,13 +197,15 @@ SEARCH_RESULT_TRUNCATE = os.environ.get("SEARCH_RESULT_TRUNCATE", "true").lower(
 SEARCH_RESULT_MAX_CHARS = int(os.environ.get("SEARCH_RESULT_MAX_CHARS", 1000))  # Default 1000 characters per result
 
 # Debug output function for search results
-def debug_search_result(search_engine: str, query: str, results: any) -> None:
+def debug_search_result(search_engine: str, query: str, results: any, cache_status: str = None, api_info: str = None) -> None:
     """Print debug output for search results to the console.
     
     Args:
         search_engine: Name of the search engine
         query: The search query
         results: The search results (string or other format)
+        cache_status: Optional cache status (hit/miss/disabled)
+        api_info: Optional API information
     """
     # Convert results to string if not already
     if not isinstance(results, str):
@@ -217,6 +219,13 @@ def debug_search_result(search_engine: str, query: str, results: any) -> None:
     separator = "=" * 80
     print(separator)
     print(f"[DEBUG] {search_engine} RESULTS FOR: '{query}'")
+    
+    # Print cache and API information if available
+    if cache_status:
+        print(f"[CACHE STATUS] {cache_status}")
+    if api_info:
+        print(f"[API INFO] {api_info}")
+        
     print(separator)
     
     # Always print results, but truncate if they're too long
@@ -506,8 +515,6 @@ from tools import (
     get_weather,
     get_news,
     calculate,
-    calculate_math,
-    evaluate_expression,
     get_fun_content,
     take_screenshot,
     clean_html,
@@ -705,11 +712,54 @@ async def entrypoint(ctx: JobContext):
             # Limit number of results to a reasonable range
             num_results = max(1, min(num_results, 10))
             
+            # Track cache status and API info
+            cache_status = "UNKNOWN"
+            api_info = "Brave Search API"
+            
+            # Get API configuration info
+            try:
+                # First try our new custom implementation
+                try:
+                    from brave_search_api import get_api_config
+                    config = get_api_config()
+                    if config:
+                        api_info = f"Brave Search API (Custom Implementation) - Cache: {config.get('cache_enabled', 'Unknown')}, Rate Limit: {config.get('rate_limit', 'Unknown')}"
+                except ImportError:
+                    # Try our no-API-key implementation
+                    try:
+                        from brave_search_nokey import get_api_config
+                        config = get_api_config()
+                        if config:
+                            api_info = f"Brave Search (No API Key Implementation) - Cache: {config.get('cache_enabled', 'Unknown')}, Rate Limit: {config.get('rate_limit', 'Unknown')}"
+                    except ImportError:
+                        # Fall back to free tier implementation
+                        try:
+                            from brave_search_free_tier import get_api_config
+                            config = get_api_config()
+                            if config:
+                                api_info = f"Brave Search API (Free Tier Implementation) - Keys: {config.get('num_keys', 'Unknown')}, Rate Limit: {config.get('rate_limit', 'Unknown')}, Cache: {config.get('cache_enabled', 'Unknown')}"
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            
+            # Call the API and track if it's a cache hit
+            start_time = time.time()
             logging.info(f"Using Brave Search API explicitly for query: '{query}'")
             results = await brave_web_search(query, num_results)
+            end_time = time.time()
             
-            # Print debug output to console
-            debug_search_result("BRAVE SEARCH", query, results)
+            # Try to determine if it was a cache hit based on response time
+            if end_time - start_time < 0.1:
+                cache_status = "HIT (likely - based on response time)"
+            else:
+                cache_status = "MISS (likely - based on response time)"
+            
+            # Add API response time to the API info
+            api_info += f" - Response time: {end_time - start_time:.4f}s"
+            
+            # Print debug output to console with cache status and API info
+            debug_search_result("BRAVE SEARCH", query, results, cache_status, api_info)
             
             session = getattr(context, 'session', None)
             if session:
@@ -785,20 +835,73 @@ async def entrypoint(ctx: JobContext):
             str: Formatted search results with titles and URLs
         """
         try:
-            # Try to import from duckduckgo_search.py
+            # Try to import from duckduckgo_search
             try:
-                from duckduckgo_search import ddg_web_search
+                from duckduckgo_search import DDGS
                 logging.info(f"Using DuckDuckGo search for query: '{query}'")
-                results = await ddg_web_search(query, num_results)
                 
-                # Print debug output to console
-                debug_search_result("DUCKDUCKGO SEARCH", query, results)
+                # Ensure query is a string
+                if not isinstance(query, str):
+                    query = str(query)
+                    
+                # Ensure num_results is an integer
+                if not isinstance(num_results, int):
+                    try:
+                        num_results = int(num_results)
+                    except (ValueError, TypeError):
+                        num_results = 5
+                
+                # Limit number of results to a reasonable range
+                num_results = max(1, min(num_results, 10))
+                
+                # Track cache status and API info
+                cache_status = "UNKNOWN"
+                api_info = "DuckDuckGo Search API"
+                
+                # Call the API and track if it's a cache hit
+                start_time = time.time()
+                
+                # Create DDGS instance
+                ddgs = DDGS()
+                
+                # Run in executor to avoid blocking the event loop
+                loop = asyncio.get_event_loop()
+                results_list = await loop.run_in_executor(
+                    None,
+                    lambda: ddgs.text(query, region="wt-wt", safesearch="moderate", max_results=num_results)
+                )
+                
+                end_time = time.time()
+                
+                # Try to determine if it was a cache hit based on response time
+                if end_time - start_time < 0.1:
+                    cache_status = "HIT (likely - based on response time)"
+                else:
+                    cache_status = "MISS (likely - based on response time)"
+                
+                # Add API response time to the API info
+                api_info += f" - Response time: {end_time - start_time:.4f}s"
+                
+                # Format the results
+                if not results_list:
+                    formatted_results = f"No results found for '{query}' on DuckDuckGo."
+                else:
+                    formatted_results = f"DuckDuckGo search results for '{query}':\n\n"
+                    
+                    for i, result in enumerate(results_list, 1):
+                        title = result.get('title', 'No title')
+                        href = result.get('href', 'No URL')
+                        body = result.get('body', 'No description')
+                        formatted_results += f"{i}. {title}\n   URL: {href}\n   {body}\n\n"
+                
+                # Print debug output to console with cache status and API info
+                debug_search_result("DUCKDUCKGO SEARCH", query, formatted_results, cache_status, api_info)
                 
                 session = getattr(context, 'session', None)
                 if session:
-                    await handle_tool_results(session, results)
+                    await handle_tool_results(session, formatted_results)
                     return "I've found some results using DuckDuckGo and will read them to you now."
-                return results
+                return formatted_results
             except ImportError:
                 return "DuckDuckGo Search is not available. Please try another search tool."
         except Exception as e:
@@ -824,42 +927,63 @@ async def entrypoint(ctx: JobContext):
             str: Formatted search results with titles and URLs
         """
         try:
-            # Try to import from googlesearch
+            # Ensure query is a string
+            if not isinstance(query, str):
+                query = str(query)
+                
+            # Ensure num_results is an integer
+            if not isinstance(num_results, int):
+                try:
+                    num_results = int(num_results)
+                except (ValueError, TypeError):
+                    num_results = 5
+            
+            # Limit number of results to a reasonable range
+            num_results = max(1, min(num_results, 10))
+            
+            # Track cache status and API info
+            cache_status = "UNKNOWN"
+            api_info = "Google Search API"
+            
+            # First try to use the google-search package
             try:
-                from googlesearch import search as google_search_func
-                logging.info(f"Using Google search for query: '{query}'")
+                from googlesearch.googlesearch import GoogleSearch
+                logging.info(f"Using Google search (google-search package) for query: '{query}'")
                 
-                # Ensure query is a string
-                if not isinstance(query, str):
-                    query = str(query)
-                    
-                # Ensure num_results is an integer
-                if not isinstance(num_results, int):
-                    try:
-                        num_results = int(num_results)
-                    except (ValueError, TypeError):
-                        num_results = 5
-                
-                # Limit number of results to a reasonable range
-                num_results = max(1, min(num_results, 10))
+                # Call the API and track if it's a cache hit
+                start_time = time.time()
                 
                 # Run in executor to avoid blocking
                 loop = asyncio.get_event_loop()
-                results_list = await loop.run_in_executor(
+                response = await loop.run_in_executor(
                     None,
-                    lambda: list(google_search_func(query, num_results=num_results))
+                    lambda: GoogleSearch().search(query, num_results=num_results, prefetch_results=True)
                 )
                 
-                if not results_list:
+                end_time = time.time()
+                
+                # Try to determine if it was a cache hit based on response time
+                if end_time - start_time < 0.1:
+                    cache_status = "HIT (likely - based on response time)"
+                else:
+                    cache_status = "MISS (likely - based on response time)"
+                
+                # Add API response time and package info to the API info
+                api_info += f" (google-search package) - Response time: {end_time - start_time:.4f}s"
+                
+                if not response.results:
                     return f"No results found for '{query}' on Google."
                 
                 formatted = f"Google search results for '{query}':\n\n"
                 
-                for i, result in enumerate(results_list, 1):
-                    formatted += f"{i}. {result}\n\n"
+                for i, result in enumerate(response.results, 1):
+                    title = result.title
+                    url = result.url if hasattr(result, 'url') else "No URL"
+                    content = result.getText() if hasattr(result, 'getText') else "No content"
+                    formatted += f"{i}. {title}\n   URL: {url}\n   {content}\n\n"
                 
-                # Print debug output to console
-                debug_search_result("GOOGLE SEARCH", query, formatted)
+                # Print debug output to console with cache status and API info
+                debug_search_result("GOOGLE SEARCH", query, formatted, cache_status, api_info)
                 
                 session = getattr(context, 'session', None)
                 if session:
@@ -867,7 +991,50 @@ async def entrypoint(ctx: JobContext):
                     return "I've found some results using Google and will read them to you now."
                 return formatted
             except ImportError:
-                return "Google Search is not available. Please try another search tool."
+                # Fall back to googlesearch-python package
+                try:
+                    from googlesearch import search as google_search_func
+                    logging.info(f"Using Google search (googlesearch-python package) for query: '{query}'")
+                    
+                    # Call the API and track if it's a cache hit
+                    start_time = time.time()
+                    
+                    # Run in executor to avoid blocking
+                    loop = asyncio.get_event_loop()
+                    results_list = await loop.run_in_executor(
+                        None,
+                        lambda: list(google_search_func(query, num_results=num_results))
+                    )
+                    
+                    end_time = time.time()
+                    
+                    # Try to determine if it was a cache hit based on response time
+                    if end_time - start_time < 0.1:
+                        cache_status = "HIT (likely - based on response time)"
+                    else:
+                        cache_status = "MISS (likely - based on response time)"
+                    
+                    # Add API response time and package info to the API info
+                    api_info += f" (googlesearch-python package) - Response time: {end_time - start_time:.4f}s"
+                    
+                    if not results_list:
+                        return f"No results found for '{query}' on Google."
+                    
+                    formatted = f"Google search results for '{query}':\n\n"
+                    
+                    for i, result in enumerate(results_list, 1):
+                        formatted += f"{i}. {result}\n\n"
+                    
+                    # Print debug output to console with cache status and API info
+                    debug_search_result("GOOGLE SEARCH", query, formatted, cache_status, api_info)
+                    
+                    session = getattr(context, 'session', None)
+                    if session:
+                        await handle_tool_results(session, formatted)
+                        return "I've found some results using Google and will read them to you now."
+                    return formatted
+                except ImportError:
+                    return "Google Search is not available. Please try another search tool."
         except Exception as e:
             logging.error(f"Error in google_search: {e}")
             error_msg = f"I couldn't find any results for '{query}' using Google Search. Try a different query or search tool."
@@ -909,13 +1076,36 @@ async def entrypoint(ctx: JobContext):
             # Limit number of results to a reasonable range
             num_results = max(1, min(num_results, 10))
             
+            # Track cache status and API info
+            cache_status = "UNKNOWN"
+            api_info = "Brave Search Grounding API with elastic parallel processing"
+            
+            # Get API configuration info
+            try:
+                from brave_search_free_tier import get_api_config
+                config = get_api_config()
+                if config:
+                    api_info += f" - Keys: {config.get('num_keys', 'Unknown')}, Rate Limit: {config.get('rate_limit', 'Unknown')}, Cache: {config.get('cache_enabled', 'Unknown')}"
+            except Exception:
+                pass
+            
             start_time = time.time()
             try:
                 # Use Brave Search API
                 results = await brave_web_search(query, num_results)
+                end_time = time.time()
                 
-                # Print debug output to console
-                debug_search_result("WEB SEARCH (BRAVE PRIMARY)", query, results)
+                # Try to determine if it was a cache hit based on response time
+                if end_time - start_time < 0.1:
+                    cache_status = "HIT (likely - based on response time)"
+                else:
+                    cache_status = "MISS (likely - based on response time)"
+                
+                # Add API response time to the API info
+                api_info += f" - Response time: {end_time - start_time:.4f}s"
+                
+                # Print debug output to console with cache status and API info
+                debug_search_result("WEB SEARCH (BRAVE PRIMARY)", query, results, cache_status, api_info)
                 
                 # Handle session output for voice responses if available
                 session = getattr(context, 'session', None)

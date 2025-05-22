@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from typing import List, Dict, Any, Optional, Union
 
 # Import debug_search_result function from agent.py
@@ -26,7 +27,7 @@ except ImportError:
     # Default max chars if we can't import from agent.py
     SEARCH_RESULT_MAX_CHARS = 1000
     # Fallback debug function if agent.py can't be imported
-    def debug_search_result(search_engine: str, query: str, results: any) -> None:
+    def debug_search_result(search_engine: str, query: str, results: any, cache_status: str = None, api_info: str = None) -> None:
         """Fallback debug output function for search results."""
         # Convert results to string if not already
         if not isinstance(results, str):
@@ -40,6 +41,13 @@ except ImportError:
         separator = "=" * 80
         print(separator)
         print(f"[DEBUG] {search_engine} RESULTS FOR: '{query}'")
+        
+        # Print cache and API information if available
+        if cache_status:
+            print(f"[CACHE STATUS] {cache_status}")
+        if api_info:
+            print(f"[API INFO] {api_info}")
+            
         print(separator)
         
         # Always print results, but truncate if they're too long
@@ -66,18 +74,34 @@ WIKIPEDIA_ENABLED = os.environ.get("WIKIPEDIA_ENABLE", "true").lower() in ("true
 # Try to import Brave Search
 HAS_BRAVE_SEARCH = False
 if BRAVE_SEARCH_ENABLED:
+    # First try our new custom implementation
     try:
-        from brave_search_free_tier import web_search as brave_search_api
+        from brave_search_api import web_search as brave_search_api
+        from brave_search_api import get_api_config
         HAS_BRAVE_SEARCH = True
-        logger.info("Brave Search API available and enabled")
+        logger.info("Brave Search API available and enabled (using our custom implementation)")
     except ImportError:
+        # Try our no-API-key implementation
         try:
-            # Try alternative import path
-            from brave_search import web_search as brave_search_api
+            from brave_search_nokey import web_search as brave_search_api
+            from brave_search_nokey import get_api_config
             HAS_BRAVE_SEARCH = True
-            logger.info("Brave Search API available and enabled (alternative import)")
+            logger.info("Brave Search available and enabled (using no-API-key implementation)")
         except ImportError:
-            logger.warning("Brave Search API not available")
+            # Fall back to previous custom implementation
+            try:
+                from brave_search_free_tier import web_search as brave_search_api
+                from brave_search_free_tier import get_api_config
+                HAS_BRAVE_SEARCH = True
+                logger.info("Brave Search API available and enabled (using free tier implementation)")
+            except ImportError:
+                try:
+                    # Try alternative import path
+                    from brave_search import web_search as brave_search_api
+                    HAS_BRAVE_SEARCH = True
+                    logger.info("Brave Search API available and enabled (alternative import)")
+                except ImportError:
+                    logger.warning("Brave Search API not available")
 else:
     logger.info("Brave Search API disabled via environment variable")
     
@@ -97,10 +121,28 @@ async def brave_web_search(query: str, num_results: int = 5) -> str:
     
     try:
         logger.info(f"Using Brave Search API for query: '{query}'")
-        results = await brave_search_api(query, num_results)
         
-        # Print debug output
-        debug_search_result("BRAVE SEARCH API", query, results)
+        # Track cache status and API info
+        cache_status = "UNKNOWN"
+        api_info = "Brave Search API"
+        
+        # Call the API and track if it's a cache hit
+        start_time = time.time()
+        results = await brave_search_api(query, num_results)
+        end_time = time.time()
+        
+        # Try to determine if it was a cache hit based on response time
+        # This is a heuristic - actual cache status would be better if available from the API
+        if end_time - start_time < 0.1:
+            cache_status = "HIT (likely - based on response time)"
+        else:
+            cache_status = "MISS (likely - based on response time)"
+        
+        # Add API response time to the API info
+        api_info += f" - Response time: {end_time - start_time:.4f}s"
+        
+        # Print debug output with cache status and API info
+        debug_search_result("BRAVE SEARCH API", query, results, cache_status, api_info)
         
         return results
     except Exception as e:
@@ -110,12 +152,20 @@ async def brave_web_search(query: str, num_results: int = 5) -> str:
 # Try to import DuckDuckGo Search
 HAS_DUCKDUCKGO = False
 if DUCKDUCKGO_SEARCH_ENABLED:
+    # First try our new no-API-key implementation
     try:
-        from duckduckgo_search import ddg_web_search as ddg_search_api
+        from duckduckgo_nokey import web_search as ddg_search_api
+        from duckduckgo_nokey import get_api_config
         HAS_DUCKDUCKGO = True
-        logger.info("DuckDuckGo Search available and enabled")
+        logger.info("DuckDuckGo Search available and enabled (using no-API-key implementation)")
     except ImportError:
-        logger.warning("DuckDuckGo Search not available")
+        # Fall back to official package
+        try:
+            from duckduckgo_search import DDGS
+            HAS_DUCKDUCKGO = True
+            logger.info("DuckDuckGo Search available and enabled (using official package)")
+        except ImportError:
+            logger.warning("DuckDuckGo Search not available")
 else:
     logger.info("DuckDuckGo Search disabled via environment variable")
     
@@ -135,19 +185,107 @@ async def ddg_web_search(query: str, num_results: int = 5) -> str:
     
     try:
         logger.info(f"Using DuckDuckGo Search for query: '{query}'")
-        results = await ddg_search_api(query, num_results)
         
-        # Print debug output
-        debug_search_result("DUCKDUCKGO SEARCH", query, results)
+        # Track cache status and API info
+        cache_status = "UNKNOWN"
+        api_info = "DuckDuckGo Search API"
         
-        return results
+        # First try our no-API-key implementation if available
+        if 'ddg_search_api' in globals():
+            try:
+                # Get API configuration info
+                try:
+                    config = get_api_config()
+                    if config:
+                        api_info = f"DuckDuckGo Search (No API Key Implementation) - Cache: {config.get('cache_enabled', 'Unknown')}, Rate Limit: {config.get('rate_limit', 'Unknown')}"
+                except Exception:
+                    pass
+                
+                # Call the API and track if it's a cache hit
+                start_time = time.time()
+                results = await ddg_search_api(query, num_results)
+                end_time = time.time()
+                
+                # Try to determine if it was a cache hit based on response time
+                if end_time - start_time < 0.1:
+                    cache_status = "HIT (likely - based on response time)"
+                else:
+                    cache_status = "MISS (likely - based on response time)"
+                
+                # Add API response time to the API info
+                api_info += f" - Response time: {end_time - start_time:.4f}s"
+                
+                # Print debug output with cache status and API info
+                debug_search_result("DUCKDUCKGO SEARCH", query, results, cache_status, api_info)
+                
+                return results
+            except Exception as e:
+                logger.error(f"DuckDuckGo no-API-key implementation error: {e}")
+                # Fall back to official package
+        
+        # Fall back to official package if no-API-key implementation fails or isn't available
+        api_info = "DuckDuckGo Search API (Official Package)"
+        
+        # Call the API and track if it's a cache hit
+        start_time = time.time()
+        
+        # Create DDGS instance
+        ddgs = DDGS()
+        
+        # Run in executor to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        results_list = await loop.run_in_executor(
+            None,
+            lambda: ddgs.text(query, region="wt-wt", safesearch="moderate", max_results=num_results)
+        )
+        
+        end_time = time.time()
+        
+        # Try to determine if it was a cache hit based on response time
+        if end_time - start_time < 0.1:
+            cache_status = "HIT (likely - based on response time)"
+        else:
+            cache_status = "MISS (likely - based on response time)"
+        
+        # Add API response time to the API info
+        api_info += f" - Response time: {end_time - start_time:.4f}s"
+        
+        if not results_list:
+            return f"No results found for '{query}' on DuckDuckGo."
+        
+        # Format the results
+        formatted = f"DuckDuckGo search results for '{query}':\n\n"
+        
+        for i, result in enumerate(results_list, 1):
+            title = result.get('title', 'No title')
+            url = result.get('href', 'No URL')
+            description = result.get('body', 'No description')
+            formatted += f"{i}. {title}\n   URL: {url}\n   {description}\n\n"
+        
+        # Print debug output with cache status and API info
+        debug_search_result("DUCKDUCKGO SEARCH", query, formatted, cache_status, api_info)
+        
+        return formatted
     except Exception as e:
         logger.error(f"DuckDuckGo Search error: {e}")
         return f"Error searching with DuckDuckGo for '{query}': {str(e)}"
 
-# Try to import optimized Bing Search for speed
+# Try to import Bing Search implementations
 HAS_BING_FAST = False
+HAS_BING_NOKEY = False
+HAS_BING_QUALITY = False
+
 if BING_SEARCH_ENABLED:
+    # First try our no-API-key implementation
+    try:
+        from bing_search_nokey import web_search as bing_search_nokey
+        from bing_search_nokey import get_api_config as bing_get_api_config
+        HAS_BING_NOKEY = True
+        logger.info("Bing Search available and enabled (using no-API-key implementation)")
+    except ImportError:
+        logger.warning("Bing Search no-API-key implementation not available")
+    
+    # Try to import optimized Bing Search for speed
     try:
         from bing_search import scrape_bing as bing_scrape_fast
         from bing_search import async_scrape_bing as bing_async_scrape_fast
@@ -159,7 +297,6 @@ if BING_SEARCH_ENABLED:
         logger.warning("Fast Bing Search not available")
 
     # Try to import enriched Bing Search for quality
-    HAS_BING_QUALITY = False
     try:
         from bing_extended import scrape_bing as bing_scrape_quality
         from bing_extended import bing_search as bing_search_quality
@@ -169,17 +306,25 @@ if BING_SEARCH_ENABLED:
         logger.warning("Quality Bing Search not available")
 else:
     logger.info("Bing Search disabled via environment variable")
-    HAS_BING_QUALITY = False
 
 # Try to import Google Search
 HAS_GOOGLE = False
+HAS_GOOGLE_SEARCH_PACKAGE = False
 if GOOGLE_SEARCH_ENABLED:
+    # First try to import from google-search package
     try:
-        from googlesearch import search as google_search_func
+        from googlesearch.googlesearch import GoogleSearch
+        HAS_GOOGLE_SEARCH_PACKAGE = True
         HAS_GOOGLE = True
-        logger.info("Google Search available and enabled")
+        logger.info("Google Search available and enabled (using google-search package)")
     except ImportError:
-        logger.warning("Google Search not available")
+        # Fall back to googlesearch-python package
+        try:
+            from googlesearch import search as google_search_func
+            HAS_GOOGLE = True
+            logger.info("Google Search available and enabled (using googlesearch-python package)")
+        except ImportError:
+            logger.warning("Google Search not available")
 else:
     logger.info("Google Search disabled via environment variable")
 
@@ -195,14 +340,6 @@ async def format_bing_results(results: List[Dict[str, Any]], query: str) -> str:
         link = result.get('link', 'No link')
         snippet = result.get('snippet', '')
         
-        formatted += f"{i}. {title}\n   {link}\n"
-        if snippet:
-            formatted += f"   {snippet}\n"
-        formatted += "\n"
-    
-    return formatted
-
-async def bing_web_search(query: str, num_results: int = 5, context=None) -> str:
     """Search the web using Bing and return formatted results.
     
     Args:
@@ -213,16 +350,71 @@ async def bing_web_search(query: str, num_results: int = 5, context=None) -> str
     Returns:
         Formatted string with search results
     """
-    # First try fast Bing search from bing_search.py (optimized for speed)
+    # First try our no-API-key implementation if available
+    if HAS_BING_NOKEY:
+        try:
+            logger.info(f"Using Bing search no-API-key implementation for query: '{query}'")
+            
+            # Get API configuration info
+            try:
+                config = bing_get_api_config()
+                if config:
+                    api_info = f"Bing Search (No API Key Implementation) - Cache: {config.get('cache_enabled', 'Unknown')}, Rate Limit: {config.get('rate_limit', 'Unknown')}"
+                else:
+                    api_info = "Bing Search (No API Key Implementation)"
+            except Exception:
+                api_info = "Bing Search (No API Key Implementation)"
+            
+            # Call the API and track if it's a cache hit
+            start_time = time.time()
+            results = await bing_search_nokey(query, num_results)
+            end_time = time.time()
+            
+            # Try to determine if it was a cache hit based on response time
+            if end_time - start_time < 0.1:
+                cache_status = "HIT (likely - based on response time)"
+            else:
+                cache_status = "MISS (likely - based on response time)"
+            
+            # Add API response time to the API info
+            api_info += f" - Response time: {end_time - start_time:.4f}s"
+            
+            # Print debug output with cache status and API info
+            debug_search_result("BING SEARCH (NO API KEY)", query, results, cache_status, api_info)
+            
+            return results
+        except Exception as e:
+            logger.error(f"Bing search no-API-key implementation error: {e}")
+            # Fall back to fast Bing search
+    
+    # Next try fast Bing search from bing_search.py (optimized for speed)
     if HAS_BING_FAST:
         try:
             logger.info(f"Using fast Bing search from bing_search.py for query: '{query}'")
+            
+            # Track cache status and API info
+            cache_status = "UNKNOWN"
+            api_info = "Bing Search API (Fast Version)"
+            
+            start_time = time.time()
+            
             if context:
                 # If we have a context, use the function_tool version
                 results = await bing_search_fast(context, query, num_results)
                 
-                # Print debug output
-                debug_search_result("BING SEARCH (FAST)", query, results)
+                end_time = time.time()
+                
+                # Try to determine if it was a cache hit based on response time
+                if end_time - start_time < 0.1:
+                    cache_status = "HIT (likely - based on response time)"
+                else:
+                    cache_status = "MISS (likely - based on response time)"
+                
+                # Add API response time to the API info
+                api_info += f" - Response time: {end_time - start_time:.4f}s"
+                
+                # Print debug output with cache status and API info
+                debug_search_result("BING SEARCH (FAST)", query, results, cache_status, api_info)
                 
                 return results
             else:
@@ -230,8 +422,19 @@ async def bing_web_search(query: str, num_results: int = 5, context=None) -> str
                 results = await bing_async_scrape_fast(query, num_results)
                 formatted_results = format_bing_results_fast(results, query)
                 
-                # Print debug output
-                debug_search_result("BING SEARCH (FAST)", query, formatted_results)
+                end_time = time.time()
+                
+                # Try to determine if it was a cache hit based on response time
+                if end_time - start_time < 0.1:
+                    cache_status = "HIT (likely - based on response time)"
+                else:
+                    cache_status = "MISS (likely - based on response time)"
+                
+                # Add API response time to the API info
+                api_info += f" - Response time: {end_time - start_time:.4f}s"
+                
+                # Print debug output with cache status and API info
+                debug_search_result("BING SEARCH (FAST)", query, formatted_results, cache_status, api_info)
                 
                 return formatted_results
         except Exception as e:
@@ -242,12 +445,30 @@ async def bing_web_search(query: str, num_results: int = 5, context=None) -> str
     if HAS_BING_QUALITY:
         try:
             logger.info(f"Using quality Bing search from bing_extended.py for query: '{query}'")
+            
+            # Track cache status and API info
+            cache_status = "UNKNOWN"
+            api_info = "Bing Search API (Quality Version)"
+            
+            start_time = time.time()
+            
             if context:
                 # If we have a context, use the function_tool version
                 results = await bing_search_quality(context, query, num_results)
                 
-                # Print debug output
-                debug_search_result("BING SEARCH (QUALITY)", query, results)
+                end_time = time.time()
+                
+                # Try to determine if it was a cache hit based on response time
+                if end_time - start_time < 0.1:
+                    cache_status = "HIT (likely - based on response time)"
+                else:
+                    cache_status = "MISS (likely - based on response time)"
+                
+                # Add API response time to the API info
+                api_info += f" - Response time: {end_time - start_time:.4f}s"
+                
+                # Print debug output with cache status and API info
+                debug_search_result("BING SEARCH (QUALITY)", query, results, cache_status, api_info)
                 
                 return results
             else:
@@ -255,8 +476,19 @@ async def bing_web_search(query: str, num_results: int = 5, context=None) -> str
                 results = await bing_scrape_quality(query, num_results=num_results)
                 formatted_results = await format_bing_results(results, query)
                 
-                # Print debug output
-                debug_search_result("BING SEARCH (QUALITY)", query, formatted_results)
+                end_time = time.time()
+                
+                # Try to determine if it was a cache hit based on response time
+                if end_time - start_time < 0.1:
+                    cache_status = "HIT (likely - based on response time)"
+                else:
+                    cache_status = "MISS (likely - based on response time)"
+                
+                # Add API response time to the API info
+                api_info += f" - Response time: {end_time - start_time:.4f}s"
+                
+                # Print debug output with cache status and API info
+                debug_search_result("BING SEARCH (QUALITY)", query, formatted_results, cache_status, api_info)
                 
                 return formatted_results
         except Exception as e:
@@ -270,23 +502,74 @@ async def google_web_search(query: str, num_results: int = 5) -> str:
         return f"Google Search is not available."
     
     try:
-        # Run in executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(
-            None,
-            lambda: list(google_search_func(query, num_results=num_results))
-        )
+        # Track cache status and API info
+        cache_status = "UNKNOWN"
+        api_info = "Google Search API"
         
-        if not results:
-            return f"No results found for '{query}' on Google."
+        # Call the API and track if it's a cache hit
+        start_time = time.time()
         
-        formatted = f"Google search results for '{query}':\n\n"
+        # Choose the appropriate search method based on available packages
+        if HAS_GOOGLE_SEARCH_PACKAGE:
+            # Use the google-search package
+            # Run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: GoogleSearch().search(query, num_results=num_results, prefetch_results=True)
+            )
+            
+            end_time = time.time()
+            
+            # Try to determine if it was a cache hit based on response time
+            if end_time - start_time < 0.1:
+                cache_status = "HIT (likely - based on response time)"
+            else:
+                cache_status = "MISS (likely - based on response time)"
+            
+            # Add API response time and package info to the API info
+            api_info += f" (google-search package) - Response time: {end_time - start_time:.4f}s"
+            
+            if not response.results:
+                return f"No results found for '{query}' on Google."
+            
+            formatted = f"Google search results for '{query}':\n\n"
+            
+            for i, result in enumerate(response.results, 1):
+                title = result.title
+                url = result.url if hasattr(result, 'url') else "No URL"
+                content = result.getText() if hasattr(result, 'getText') else "No content"
+                formatted += f"{i}. {title}\n   URL: {url}\n   {content}\n\n"
+        else:
+            # Fall back to googlesearch-python package
+            # Run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(
+                None,
+                lambda: list(google_search_func(query, num_results=num_results))
+            )
+            
+            end_time = time.time()
+            
+            # Try to determine if it was a cache hit based on response time
+            if end_time - start_time < 0.1:
+                cache_status = "HIT (likely - based on response time)"
+            else:
+                cache_status = "MISS (likely - based on response time)"
+            
+            # Add API response time and package info to the API info
+            api_info += f" (googlesearch-python package) - Response time: {end_time - start_time:.4f}s"
+            
+            if not results:
+                return f"No results found for '{query}' on Google."
+            
+            formatted = f"Google search results for '{query}':\n\n"
+            
+            for i, result in enumerate(results, 1):
+                formatted += f"{i}. {result}\n\n"
         
-        for i, result in enumerate(results, 1):
-            formatted += f"{i}. {result}\n\n"
-        
-        # Print debug output
-        debug_search_result("GOOGLE SEARCH", query, formatted)
+        # Print debug output with cache status and API info
+        debug_search_result("GOOGLE SEARCH", query, formatted, cache_status, api_info)
         
         return formatted
     except Exception as e:
@@ -396,10 +679,27 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
     if DUCKDUCKGO_SEARCH_ENABLED and HAS_DUCKDUCKGO:
         try:
             logger.info(f"Trying DuckDuckGo Search for query: '{query}'")
-            ddg_results = await ddg_web_search(query, num_results)
             
-            # Print debug output
-            debug_search_result("FALLBACK DUCKDUCKGO SEARCH", query, ddg_results)
+            # Track cache status and API info
+            cache_status = "UNKNOWN"
+            api_info = "DuckDuckGo Search API (Fallback)"
+            
+            # Call the API and track if it's a cache hit
+            start_time = time.time()
+            ddg_results = await ddg_web_search(query, num_results)
+            end_time = time.time()
+            
+            # Try to determine if it was a cache hit based on response time
+            if end_time - start_time < 0.1:
+                cache_status = "HIT (likely - based on response time)"
+            else:
+                cache_status = "MISS (likely - based on response time)"
+            
+            # Add API response time to the API info
+            api_info += f" - Response time: {end_time - start_time:.4f}s"
+            
+            # Print debug output with cache status and API info
+            debug_search_result("FALLBACK DUCKDUCKGO SEARCH", query, ddg_results, cache_status, api_info)
             
             if ddg_results and "No results found" not in ddg_results:
                 logger.info(f"DuckDuckGo Search succeeded for query: '{query}'")
@@ -435,10 +735,27 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
     if GOOGLE_SEARCH_ENABLED and HAS_GOOGLE:
         try:
             logger.info(f"Trying Google Search for query: '{query}'")
-            google_results = await google_web_search(query, num_results)
             
-            # Print debug output
-            debug_search_result("FALLBACK GOOGLE SEARCH", query, google_results)
+            # Track cache status and API info
+            cache_status = "UNKNOWN"
+            api_info = "Google Search API (Fallback)"
+            
+            # Call the API and track if it's a cache hit
+            start_time = time.time()
+            google_results = await google_web_search(query, num_results)
+            end_time = time.time()
+            
+            # Try to determine if it was a cache hit based on response time
+            if end_time - start_time < 0.1:
+                cache_status = "HIT (likely - based on response time)"
+            else:
+                cache_status = "MISS (likely - based on response time)"
+            
+            # Add API response time to the API info
+            api_info += f" - Response time: {end_time - start_time:.4f}s"
+            
+            # Print debug output with cache status and API info
+            debug_search_result("FALLBACK GOOGLE SEARCH", query, google_results, cache_status, api_info)
             
             if google_results and "No results found" not in google_results:
                 logger.info(f"Google Search succeeded for query: '{query}'")
