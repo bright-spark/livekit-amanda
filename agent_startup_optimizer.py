@@ -110,19 +110,8 @@ class AgentStartupOptimizer:
         """
         logger.info("Making agent responsive with minimal configuration")
         
-        # Set initial minimal instructions to make the agent responsive
-        current_date = datetime.now().strftime("%Y-%m-%d")
-        initial_instructions = f"""
-            You are Amanda, an advanced AI assistant.
-            Your primary goal is to be helpful, informative, and efficient in your responses.
-            
-            It is now {current_date}.
-            
-            I'm currently loading tools and capabilities. I'll be fully operational shortly.
-            I can already respond to general questions and requests.
-        """
-        
-        await self.agent.update_instructions(initial_instructions)
+        # The agent already has initial instructions from the entrypoint function
+        # So we just need to connect to the room and start the session
         
         # Connect to the room to make the agent responsive
         await self.ctx.connect()
@@ -722,8 +711,19 @@ async def optimized_entrypoint(ctx: JobContext):
     Args:
         ctx: The job context for the agent
     """
-    # Create the agent
-    agent = Agent()
+    # Create the agent with minimal initial instructions
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    initial_instructions = f"""
+        You are Amanda, an advanced AI assistant.
+        Your primary goal is to be helpful, informative, and efficient in your responses.
+        
+        It is now {current_date}.
+        
+        I'm currently loading tools and capabilities. I'll be fully operational shortly.
+        I can already respond to general questions and requests.
+    """
+    
+    agent = Agent(instructions=initial_instructions)
     
     # Create the optimizer
     optimizer = AgentStartupOptimizer()
