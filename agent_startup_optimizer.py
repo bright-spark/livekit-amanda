@@ -733,14 +733,29 @@ class AgentStartupOptimizer:
         logger.info(f"Agent status update: {status_message}")
         
         # Send a message to the console to indicate tool availability
-        if self.session:
-            try:
-                await self.session.send_message(f"[SYSTEM] {status_message}")
-            except Exception as e:
-                logger.error(f"Error sending status message to console: {e}")
+        # We can't directly send messages to the console, so we'll just log it
+        # The user will see the loaded tools in the log output
         
+        # Update the agent's instructions with the current capabilities
         current_date = datetime.now().strftime("%Y-%m-%d")
         tool_sources_str = ", ".join(self.tool_sources)
+        
+        updated_instructions = f"""
+            You are Amanda, an advanced AI assistant.
+            Your primary goal is to be helpful, informative, and efficient in your responses.
+            
+            It is now {current_date}.
+            
+            Available tool sources: {tool_sources_str}
+            
+            Status: {status_message}
+        """
+        
+        # Update the agent's instructions
+        try:
+            await self.agent.update_instructions(updated_instructions)
+        except Exception as e:
+            logger.error(f"Error updating agent instructions: {e}")
         
         # Build the full instructions
         instructions = f"""
@@ -824,15 +839,15 @@ class AgentStartupOptimizer:
             External MCP tools are now available for use.
             """
         
-        # Add update message if provided
-        if update_message:
+        # Add status message if provided
+        if status_message:
             instructions += f"""
             
-            SYSTEM UPDATE: {update_message}
+            SYSTEM UPDATE: {status_message}
             """
         
         await self.agent.update_instructions(instructions)
-        logger.info(f"Updated agent instructions: {update_message if update_message else 'General update'}")
+        logger.info(f"Updated agent instructions: {status_message if status_message else 'General update'}")
         
     async def finalize_agent_configuration(self):
         """Finalize the agent configuration after all tools are loaded."""
