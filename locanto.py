@@ -1,6 +1,6 @@
 # Locanto configuration
 from typing import List, Dict, Any, Optional, TypedDict, Union, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlencode
 import logging
 import difflib
 import re
@@ -934,11 +934,17 @@ async def get_listing_details(self, url: str) -> Dict[str, Any]:
             await asyncio.sleep(1)
         
         return listings
+# Import the scrape_website function
+try:
+    from tools import scrape_website
+except ImportError:
+    # Fallback definition
+    async def scrape_website(context, url, selector, text_only=False):
+        return f"Could not scrape website: scrape_website function not available"
 
-# --- Web Tools ---
 @function_tool
-async def basic_search_locanto(self, context: RunContext, query: str, location: str = "", category: str = "") -> str:
-    """Search Locanto listings.
+async def basic_search_locanto(context: RunContext, query: str, location: str = "", category: str = "") -> str:
+    """Search Locanto listings using Brave Search API.
     
     Args:
         context: The run context for the tool
@@ -950,109 +956,127 @@ async def basic_search_locanto(self, context: RunContext, query: str, location: 
         str: Formatted search results
     """
     try:
-        # Build the search URL
-        base_url = "https://www.locanto.com/search"
-        params = {
-            'q': query,
-            'button': '',
-            'submit=1': '',
-        }
+        from brave_search import get_brave_search_client
         
+        # Build a more specific query for Brave Search
+        search_query = query
         if location:
-            params['loc'] = location
+            search_query += f" {location}"
         if category:
-            params['category'] = category
+            search_query += f" {category}"
         
-        # Use the web_search tool to get results
-        search_url = f"{base_url}?{urllib.parse.urlencode(params)}"
-        return await self.scrape_website(context, search_url, ".regular-ad", text_only=True)
+        # Add site restriction to focus on Locanto
+        search_query += " site:locanto.com"
+        
+        # Get the Brave Search client and perform the search
+        brave_client = get_brave_search_client()
+        results = await brave_client.search(query=search_query, count=10)
+        
+        # Format and return the results
+        formatted_results = brave_client.format_search_results(results)
+        
+        # Store the results in the session for later use if needed
+        session = getattr(context, 'session', None)
+        if session is not None and "web" in results and "results" in results["web"]:
+            url_map = {}
+            for idx, result in enumerate(results["web"]["results"], 1):
+                url = result.get("url", "")
+                if url:
+                    url_map[idx] = url
+            
+            try:
+                session.userdata['last_locanto_urls'] = url_map
+            except Exception as e:
+                logging.warning(f"Could not set session.userdata['last_locanto_urls']: {e}")
+        
+        return formatted_results
         
     except Exception as e:
-        logging.error(f"Locanto search error: {e}", exc_info=True)
-        return f"I couldn't search Locanto: {str(e)}"
+        logging.error(f"Brave Search API error: {e}", exc_info=True)
+        return f"I couldn't search using Brave Search API: {str(e)}"
 
 @function_tool
 async def search_locanto(context: RunContext, category_path: str = 'personals/men-seeking-men', location: str = 'western-cape', max_pages: int = 3, return_url: bool = False) -> str:
     try:
-        import html
-        ddg_query = f"{category_path.replace('/', ' ')} {location} site:locanto.co.za"
-        import asyncio
-        loop = asyncio.get_event_loop()
-        results = []
-        assistant = AIVoiceAssistant()
-        categories = category_path.split('/')
-        listings = await assistant.locanto_search(categories, location, max_pages)
-        if not listings:
+        from brave_search import get_brave_search_client
+        
+        # Build a more specific query for Brave Search
+        search_query = category_path.replace('/', ' ')
+        if location:
+            search_query += f" {location}"
+        
+        # Add site restriction to focus on Locanto
+        search_query += " site:locanto.co.za"
+        
+        # Get the Brave Search client and perform the search
+        brave_client = get_brave_search_client()
+        
+        # Calculate total results to fetch based on max_pages (assuming 10 results per page)
+        count = min(max_pages * 10, 20)  # Brave API has a max of 20 results per request
+        
+        results = await brave_client.search(query=search_query, count=count)
+        
+        if "error" in results:
+            summary = f"Search error: {results['error']}"
+        elif "web" not in results or "results" not in results["web"] or not results["web"]["results"]:
             summary = "No listings found matching your criteria."
         else:
+            web_results = results["web"]["results"]
             first_url = None
             url_map = {}
-            summary = f"Found {len(listings)} listings on Locanto:\n\n"
-            for idx, listing in enumerate(listings, 1):
-                if not isinstance(listing, dict):
-                    continue
-                title = listing.get('title', 'No title')
+            summary = f"Found {len(web_results)} listings on Locanto:\n\n"
+            
+            for idx, result in enumerate(web_results, 1):
+                title = result.get("title", "No title")
+                url = result.get("url", "")
+                description = result.get("description", "No description")
+                
                 title = clean_spoken(title)
                 summary += f"{idx}. {title}\n"
-                ad_id = listing.get('ad_id')
-                if ad_id:
-                    summary += f"Ad ID: {clean_spoken(str(ad_id))}\n"
-                age = listing.get('age')
-                if age:
-                    summary += f"Age: {clean_spoken(str(age))}\n"
-                category_path = listing.get('category_path', [])
-                if category_path:
-                    summary += f"Category: {clean_spoken(' > '.join(category_path))}\n"
-                price = listing.get('price')
-                if price:
-                    summary += f"Price: {clean_spoken(str(price))}\n"
-                loc = listing.get('location')
-                if loc:
-                    summary += f"Location: {clean_spoken(str(loc))}\n"
-                date_posted = listing.get('date_posted')
-                if date_posted:
-                    summary += f"Posted: {clean_spoken(str(date_posted))}\n"
-                url = listing.get('url')
+                
                 if url:
                     url_map[idx] = url
                     if not first_url:
                         first_url = url
-                contact_info = listing.get('contact_info')
-                if contact_info:
-                    summary += f"Contact: {clean_spoken(str(contact_info))}\n"
-                poster_info = listing.get('poster_info')
-                if poster_info:
-                    summary += f"Poster: {clean_spoken(str(poster_info))}\n"
-                reply_count = listing.get('reply_count')
-                if reply_count is not None:
-                    summary += f"Replies: {clean_spoken(str(reply_count))}\n"
-                description = listing.get('description')
+                    summary += f"URL: {url}\n"
+                
                 if description:
                     desc = description[:200] + '...' if len(description) > 200 else description
                     summary += f"Description: {clean_spoken(desc)}\n"
+                
+                # Extract location from description or title if possible
+                location_match = None
+                if location:
+                    location_match = location
+                summary += f"Location: {clean_spoken(location_match or 'Not specified')}\n"
+                
                 summary += "\n"
+            
             # Store mapping in session.userdata for later use
             session = getattr(context, 'session', None)
             if session is not None:
-                session.userdata['last_locanto_urls'] = url_map
+                try:
+                    session.userdata['last_locanto_urls'] = url_map
+                except Exception as e:
+                    logging.warning(f"Could not set session.userdata['last_locanto_urls']: {e}")
+            
             if first_url and return_url:
                 return first_url
+                
             if first_url:
                 summary += f"Would you like to open the first listing in your browser?"
-            if session:
-                await handle_tool_results(session, summary)
-                return "I've found some results and will read them to you now."
-            else:
-                return summary
+        
         summary = sanitize_for_azure(summary)
         summary = clean_spoken(summary)
         logging.info(f"[TOOL] search_locanto summary: {summary}")
+        
         session = getattr(context, 'session', None)
         if session:
             await handle_tool_results(session, summary)
             return "I've found some results and will read them to you now."
         else:
             return summary
+            
     except Exception as e:
         logging.error(f"[TOOL] search_locanto exception: {e}")
         return sanitize_for_azure(f"Sorry, there was a problem searching Locanto: {e}")

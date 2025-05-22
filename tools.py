@@ -838,6 +838,166 @@ async def open_known_website(context: RunContext, site_name: str, query: str = N
 # --- END: Well-known Websites Mapping and Tool ---
 
 @function_tool
+async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
+    """Search the web for information on a given query.
+    
+    Args:
+        context: The run context for the tool
+        query: The search query
+        num_results: Number of search results to return (default: 5, max: 10)
+        
+    Returns:
+        str: The search results or an error message
+    """
+    logging.info(f"[TOOL] web_search called for query: {query}, num_results: {num_results}")
+    try:
+        # Limit the number of results
+        num_results = min(num_results, 10)
+        
+        # Use Google search to get results
+        search_results = []
+        for result in google_search(query, num=num_results, stop=num_results, pause=1.0):
+            search_results.append(result)
+        
+        if not search_results:
+            msg = f"No search results found for query: {query}"
+            msg = sanitize_for_azure(msg)
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, msg)
+                return "I couldn't find any search results for that query."
+            return msg
+        
+        # Format the results
+        formatted_results = f"Search results for '{query}':\n\n"
+        for i, result in enumerate(search_results, 1):
+            formatted_results += f"{i}. {result}\n"
+        
+        formatted_results = sanitize_for_azure(formatted_results)
+        logging.info(f"[TOOL] web_search results: {formatted_results}")
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, formatted_results)
+            return f"I've found {len(search_results)} search results for '{query}'. I'll read them to you."
+        return formatted_results
+    except Exception as e:
+        logging.error(f"[TOOL] web_search exception: {e}")
+        error_msg = f"I encountered an error while searching for '{query}': {str(e)}"
+        error_msg = sanitize_for_azure(error_msg)
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I encountered an error while searching. I'll read the error message to you."
+        return error_msg
+
+@function_tool
+async def google_search(context: RunContext, query: str, num_results: int = 5) -> str:
+    """Search Google for information on a given query.
+    
+    Args:
+        context: The run context for the tool
+        query: The search query
+        num_results: Number of search results to return (default: 5, max: 10)
+        
+    Returns:
+        str: The search results or an error message
+    """
+    logging.info(f"[TOOL] google_search called for query: {query}, num_results: {num_results}")
+    try:
+        # Limit the number of results
+        num_results = min(num_results, 10)
+        
+        # Use Google search to get results
+        search_results = []
+        for result in google_search(query, num=num_results, stop=num_results, pause=1.0):
+            search_results.append(result)
+        
+        if not search_results:
+            msg = f"No Google search results found for query: {query}"
+            msg = sanitize_for_azure(msg)
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, msg)
+                return "I couldn't find any Google search results for that query."
+            return msg
+        
+        # Format the results
+        formatted_results = f"Google search results for '{query}':\n\n"
+        for i, result in enumerate(search_results, 1):
+            formatted_results += f"{i}. {result}\n"
+        
+        formatted_results = sanitize_for_azure(formatted_results)
+        logging.info(f"[TOOL] google_search results: {formatted_results}")
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, formatted_results)
+            return f"I've found {len(search_results)} Google search results for '{query}'. I'll read them to you."
+        return formatted_results
+    except Exception as e:
+        logging.error(f"[TOOL] google_search exception: {e}")
+        error_msg = f"I encountered an error while searching Google for '{query}': {str(e)}"
+        error_msg = sanitize_for_azure(error_msg)
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I encountered an error while searching Google. I'll read the error message to you."
+        return error_msg
+
+@function_tool
+async def wikipedia_search(context: RunContext, query: str, max_results: int = 3) -> str:
+    """Search Wikipedia for information on a given query.
+    
+    Args:
+        context: The run context for the tool
+        query: The search query
+        max_results: Maximum number of results to return (default: 3, max: 5)
+        
+    Returns:
+        str: The search results or an error message
+    """
+    logging.info(f"[TOOL] wikipedia_search called for query: {query}, max_results: {max_results}")
+    try:
+        # Limit the number of results
+        max_results = min(max_results, 5)
+        
+        # Use Wikipedia API to search
+        wiki_wiki = wikipediaapi.Wikipedia('en')
+        search_results = wiki_wiki.page(query)
+        
+        if not search_results.exists():
+            msg = f"No Wikipedia article found for query: {query}"
+            msg = sanitize_for_azure(msg)
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, msg)
+                return "I couldn't find any Wikipedia article for that query."
+            return msg
+        
+        # Get the summary
+        summary = search_results.summary[0:1000] + "..." if len(search_results.summary) > 1000 else search_results.summary
+        
+        formatted_results = f"Wikipedia search result for '{query}':\n\n{summary}\n\nURL: {search_results.fullurl}"
+        formatted_results = sanitize_for_azure(formatted_results)
+        logging.info(f"[TOOL] wikipedia_search results: {formatted_results}")
+        
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, formatted_results)
+            return f"I've found a Wikipedia article for '{query}'. I'll read the summary to you."
+        return formatted_results
+    except Exception as e:
+        logging.error(f"[TOOL] wikipedia_search exception: {e}")
+        error_msg = f"I encountered an error while searching Wikipedia for '{query}': {str(e)}"
+        error_msg = sanitize_for_azure(error_msg)
+        session = getattr(context, 'session', None)
+        if session:
+            await handle_tool_results(session, error_msg)
+            return "I encountered an error while searching Wikipedia. I'll read the error message to you."
+        return error_msg
+
+@function_tool
 async def web_crawl(context: RunContext, url: str, selector: str = "", max_pages: int = 1) -> str:
     """Crawl a web page and extract content, optionally using a CSS selector.
     Args:

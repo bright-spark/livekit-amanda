@@ -32,40 +32,54 @@ from pydantic import BaseModel
 from googlesearch import search as google_search
 
 # Local imports
-# Import Locanto module
+# Import Locanto module with Brave Search API integration
 try:
-    from locanto import get_locanto_client, LocantoClient, is_valid_locanto_location, is_valid_locanto_category
-    # Initialize locanto client
-    locanto_client = get_locanto_client()
-    HAS_LOCANTO = True
-    
-    # Create a wrapper function for the locanto search
-    async def search_locanto(category_path=['personals', 'men-seeking-men'], location='western-cape', max_pages=3):
-        """Search Locanto for listings in a specific category and location.
+    # Try to import the optimized Brave Search Locanto implementation first
+    try:
+        from brave_search_locanto_optimized import search_locanto, basic_search_locanto
+        from locanto import is_valid_locanto_location, is_valid_locanto_category
+        logging.info("Using optimized Brave Search API for Locanto searches")
+        HAS_LOCANTO = True
+    except ImportError:
+        # Fall back to original implementation if optimized version is not available
+        from locanto import get_locanto_client, LocantoClient, is_valid_locanto_location, is_valid_locanto_category
+        # Initialize locanto client
+        locanto_client = get_locanto_client()
+        logging.info("Using original Locanto search implementation")
+        HAS_LOCANTO = True
         
-        Args:
-            category_path: List of category path segments (default: ['personals', 'men-seeking-men'])
-            location: Location to search in (default: 'western-cape')
-            max_pages: Maximum number of pages to scrape (default: 3)
+        # Create a wrapper function for the locanto search
+        async def search_locanto(context: RunContext, category_path='personals/men-seeking-men', location='western-cape', max_pages=3, return_url=False):
+            """Search Locanto for listings in a specific category and location.
             
-        Returns:
-            List of listings or error message
-        """
-        try:
-            if not is_valid_locanto_location(location):
-                return f"Invalid location: {location}. Please use one of the valid locations."
+            Args:
+                context: The run context for the tool
+                category_path: Category path string (e.g., 'personals/men-seeking-men')
+                location: Location to search in (default: 'western-cape')
+                max_pages: Maximum number of pages to scrape (default: 3)
+                return_url: Whether to return the first URL instead of formatted results
                 
-            if len(category_path) > 0 and not is_valid_locanto_category(category_path[0]):
-                return f"Invalid category: {category_path[0]}. Please use one of the valid categories."
+            Returns:
+                List of listings or error message
+            """
+            try:
+                # Convert string category path to list if needed
+                category_path_list = category_path.split('/') if isinstance(category_path, str) else category_path
                 
-            # Get the client and perform the search
-            client = get_locanto_client()
-            listings = await client.locanto_search(category_path=category_path, location=location, max_pages=max_pages)
-            
-            return listings
-        except Exception as e:
-            logging.error(f"Error searching Locanto: {e}")
-            return f"Error searching Locanto: {str(e)}"
+                if not is_valid_locanto_location(location):
+                    return f"Invalid location: {location}. Please use one of the valid locations."
+                    
+                if len(category_path_list) > 0 and not is_valid_locanto_category(category_path_list[0]):
+                    return f"Invalid category: {category_path_list[0]}. Please use one of the valid categories."
+                    
+                # Get the client and perform the search
+                client = get_locanto_client()
+                listings = await client.locanto_search(category_path=category_path_list, location=location, max_pages=max_pages)
+                
+                return listings
+            except Exception as e:
+                logging.error(f"Error searching Locanto: {e}")
+                return f"Error searching Locanto: {str(e)}"
             
 except ImportError as e:
     logging.warning(f"Locanto module not available: {e}")
@@ -76,10 +90,18 @@ except ImportError as e:
     async def search_locanto(*args, **kwargs):
         return "Locanto search functionality is not available."
 
-# Import Indeed module
+# Import Indeed module with Brave Search API integration
 try:
-    from indeed import indeed_job_search
-    HAS_INDEED = True
+    # Try to import the optimized Brave Search Indeed implementation first
+    try:
+        from brave_search_indeed_optimized import indeed_job_search
+        logging.info("Using optimized Brave Search API for Indeed job searches")
+        HAS_INDEED = True
+    except ImportError:
+        # Fall back to original implementation if optimized version is not available
+        from indeed import indeed_job_search
+        logging.info("Using original Indeed job search implementation")
+        HAS_INDEED = True
 except ImportError as e:
     logging.warning(f"Indeed module not available: {e}")
     HAS_INDEED = False
@@ -87,7 +109,7 @@ except ImportError as e:
     # Create a dummy function when Indeed is not available
     @function_tool
     async def indeed_job_search(context: RunContext, query: str = "customer service", location: str = "Johannesburg, Gauteng") -> str:
-        """Search for jobs on Indeed using Playwright-powered scraping.
+        """Search for jobs on Indeed using Brave Search API or scraping.
         
         Args:
             context: The run context for the tool
@@ -360,7 +382,26 @@ class FunctionAgent(Agent):
 
             yield chunk
 
+# Try to import optimized Brave Search API implementations first
+try:
+    # Import the module itself to access configuration
+    import brave_search_free_tier
+    from brave_search_free_tier import web_search as brave_web_search
+    from brave_search_free_tier import get_cache_stats as brave_get_cache_stats
+    
+    # Get configuration from environment variables
+    BRAVE_SEARCH_ENABLE_CACHE = os.environ.get("BRAVE_SEARCH_ENABLE_CACHE", "true").lower() == "true"
+    BRAVE_SEARCH_ENABLE_PERSISTENCE = os.environ.get("BRAVE_SEARCH_ENABLE_PERSISTENCE", "true").lower() == "true"
+    BRAVE_SEARCH_RATE_LIMIT = int(os.environ.get("BRAVE_SEARCH_RATE_LIMIT", "1"))
+    
+    HAS_BRAVE_SEARCH = True
+    logging.info(f"Using configurable Brave Search API implementation with settings: cache={BRAVE_SEARCH_ENABLE_CACHE}, persistence={BRAVE_SEARCH_ENABLE_PERSISTENCE}, rate_limit={BRAVE_SEARCH_RATE_LIMIT}")
+except ImportError:
+    HAS_BRAVE_SEARCH = False
+    logging.warning("Brave Search implementation not available, will use fallback")
+
 # Import tools and functions from tools.py
+# First import the common tools that are always needed
 from tools import (
     # Tool functions
     get_current_time,
@@ -372,50 +413,42 @@ from tools import (
     calculate_math,
     evaluate_expression,
     get_fun_content,
-    # Web search tools
-    web_search,
-    google_search,
-    wikipedia_search,
-    wiki_lookup,
-    fallback_web_search,
     take_screenshot,
     clean_html,
     extract_links,
     open_website,
-    open_known_website,
-    web_crawl,
-    scrape_website,
-    web_search,
     google_search,
     wikipedia_search,
     wiki_lookup,
-    fallback_web_search,
-    get_fun_content
+    
+    # Utility functions
+    sanitize_for_azure,
+    clean_spoken,
+    handle_tool_results,
 )
 
-# Import Locanto related functions and classes from locanto.py
-from locanto import (
-    # Classes
-    LocantoCategory,
-    LocantoListing,
-    LocantoScraper,
-    
-    # Constants
-    LOCANTO_LOCATION_SLUGS,
-    LOCANTO_CATEGORY_SLUGS,
-    LOCANTO_SECTION_IDS,
-    LOCANTO_TAG_SLUGS,
-    
-    # Functions
-    is_valid_locanto_location,
-    is_valid_locanto_category,
-    is_valid_locanto_section,
-    is_valid_locanto_tag,
-    suggest_closest_slug,
-    show_top_locanto_categories_and_tags,
-    basic_search_locanto
-)
-            
+# Conditionally import web_search and fallback_web_search from tools if Brave Search is not available
+if not HAS_BRAVE_SEARCH:
+    from tools import web_search, fallback_web_search
+
+# Import Locanto-related functions directly from locanto.py
+try:
+    from locanto import (
+        is_valid_locanto_location,
+        is_valid_locanto_category,
+        is_valid_locanto_section,
+        is_valid_locanto_tag,
+        suggest_closest_slug,
+        show_top_locanto_categories_and_tags,
+        basic_search_locanto
+    )
+    HAS_LOCANTO_UTILS = True
+    logging.info("Imported Locanto utility functions from locanto.py")
+except ImportError:
+    HAS_LOCANTO_UTILS = False
+    logging.warning("Could not import Locanto utility functions from locanto.py")
+
+
 class AIVoiceAssistant:
     _instance = None
 
@@ -550,8 +583,124 @@ class AIVoiceAssistant:
 
 async def entrypoint(ctx: JobContext):
     """Main entrypoint for the LiveKit agent application."""
-    # Create the agent first with local tools
+    # Create the agent first
     agent = FunctionAgent()
+    
+    # Define web search tools based on availability
+    web_search_tools = []
+    if HAS_BRAVE_SEARCH:
+        # Create a function_tool wrapper for the Brave Search implementation
+        from livekit.agents import function_tool
+        
+        @function_tool
+        async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
+            """Search the web for information using optimized Brave Search API.
+            
+            Args:
+                context: The run context for the tool
+                query: The search query
+                num_results: Number of results to return (1-10)
+                
+            Returns:
+                str: Formatted search results with titles and URLs
+            """
+            try:
+                # Call the optimized Brave Search implementation
+                results = await brave_web_search(query, num_results)
+                
+                # Handle session output for voice responses if needed
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, results)
+                    return "I've found some results and will read them to you now."
+                
+                return results
+            except Exception as e:
+                logging.error(f"Error in web_search using Brave Search API: {e}")
+                error_msg = f"I couldn't find any results for '{query}'. Try a different query."
+                
+                # Handle session output for voice responses
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, error_msg)
+                    return "I couldn't find any results for your search."
+                
+                return error_msg
+        
+        @function_tool
+        async def fallback_web_search(context: RunContext, query: str, num_results: int = 10) -> str:
+            """Alternative search when primary methods fail, using Brave Search API.
+            
+            Args:
+                context: The run context for the tool
+                query: The search query
+                num_results: Number of results to return (1-20)
+                
+            Returns:
+                str: Formatted search results with titles and URLs
+            """
+            # Just use the regular web_search since we're using Brave API for both
+            return await web_search(context, query, num_results)
+            
+        web_search_tools = [web_search, fallback_web_search]
+    else:
+        # Use the original tools.py implementations
+        web_search_tools = [web_search, fallback_web_search]
+    
+    # Register all the tools with the agent
+    tools_to_register = [
+        # Time and date tools
+        get_current_time,
+        get_current_date,
+        get_current_date_and_timezone,
+        
+        # Weather and news tools
+        get_weather,
+        get_news,
+        
+        # Math calculation tools
+        calculate,
+        calculate_math,
+        evaluate_expression,
+        
+        # Fun content tools
+        get_fun_content,
+        
+        # Web tools
+        take_screenshot,
+        clean_html,
+        extract_links,
+        open_website,
+        
+        # Search tools
+        google_search,
+        wikipedia_search,
+        wiki_lookup,
+        
+        # Job search tools
+        indeed_job_search,
+        search_locanto,
+    ]
+    
+    # Add web_search and fallback_web_search based on availability
+    if HAS_BRAVE_SEARCH:
+        # Add the Brave Search API implementations
+        tools_to_register.append(web_search)
+        tools_to_register.append(fallback_web_search)
+    else:
+        # Add the original tools.py implementations
+        tools_to_register.append(web_search)
+        tools_to_register.append(fallback_web_search)
+    
+    # Add Locanto tools if available
+    if HAS_LOCANTO_UTILS:
+        tools_to_register.append(basic_search_locanto)
+        tools_to_register.append(show_top_locanto_categories_and_tags)
+    
+    # Register all tools with the agent
+    await agent.register_tools(*tools_to_register)
+    logging.info(f"Registered {len(tools_to_register)} local tools with agent")
+    
     logging.info("Created agent with local tools")
     
     # Track available tool sources for user feedback
@@ -606,11 +755,17 @@ async def entrypoint(ctx: JobContext):
     
     # Add a special instruction to the agent to prioritize web search tools
     current_date = datetime.now().strftime("%Y-%m-%d")
-    agent.update_instructions(f"""
+    
+    # Add information about Brave Search API if available
+    brave_info = ""
+    if HAS_BRAVE_SEARCH:
+        brave_info = "\n        You are using the optimized Brave Search API for web searches, which is highly efficient with caching."
+    
+    instructions = f"""
         You are Amanda, an advanced AI assistant with access to a comprehensive set of tools and capabilities.
         Your primary goal is to be helpful, informative, and efficient in your responses.
         
-        Today's date is {current_date}.
+        Today's date is {current_date}.{brave_info}
         
         IMPORTANT: When asked to search for information or look something up, ALWAYS use the web_search, 
         google_search, or wikipedia_search tools. These are the most reliable tools for finding information.
@@ -626,7 +781,10 @@ async def entrypoint(ctx: JobContext):
         - Fun content (get_fun_content)
         - Job search tools (indeed_job_search, search_locanto)
         - External tools (if Zapier MCP is available)
-    """)
+    """
+    
+    # Properly await the instructions update
+    await agent.update_instructions(instructions)
     
     logging.info("Updated agent instructions to prioritize web search tools")
     
