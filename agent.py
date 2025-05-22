@@ -19,10 +19,13 @@ import pytz
 import uvicorn
 import wikipediaapi
 
+# Load environment variables first to ensure they're available for all imports
+from dotenv import load_dotenv
+load_dotenv()
+
 # Local application imports
 from agent_utils import speak_chunks
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from geopy.exc import GeocoderTimedOut
 from geopy.geocoders import Nominatim
@@ -176,6 +179,13 @@ WELL_KNOWN_WEBSITES = {
 
 # Set of sites that support bang-style queries (e.g., @site query)
 BROWSER_TOOL = {"gemini"}
+
+# Chunking parameters for voice responses
+MAX_AUTO_CHUNKS = int(os.environ.get("MAX_AUTO_CHUNKS", 10))
+CHUNK_PAUSE = float(os.environ.get("CHUNK_PAUSE", 1.0))
+
+# Log chunking parameters
+logging.info(f"Voice response chunking configured with MAX_AUTO_CHUNKS={MAX_AUTO_CHUNKS}, CHUNK_PAUSE={CHUNK_PAUSE}s")
 
 def sanitize_for_azure(text: str) -> str:
     """Reword or mask terms that may trigger Azure OpenAI's content filter."""
@@ -585,12 +595,197 @@ async def entrypoint(ctx: JobContext):
     web_search_tools = []
     from livekit.agents import function_tool
     
+    # Individual search tools for each provider that can be called explicitly by the user
+    
+    # 1. Brave Search Tool
+    @function_tool
+    async def brave_search(context: RunContext, query: str, num_results: int = 5) -> str:
+        """Search the web using Brave Search API specifically.
+        
+        Args:
+            context: The run context for the tool
+            query: The search query
+            num_results: Number of results to return (1-10)
+            
+        Returns:
+            str: Formatted search results with titles and URLs
+        """
+        try:
+            if not HAS_BRAVE_SEARCH:
+                return "Brave Search API is not available. Please try another search tool."
+                
+            if not isinstance(query, str):
+                query = str(query)
+                
+            # Ensure num_results is an integer
+            if not isinstance(num_results, int):
+                try:
+                    num_results = int(num_results)
+                except (ValueError, TypeError):
+                    num_results = 5
+            
+            # Limit number of results to a reasonable range
+            num_results = max(1, min(num_results, 10))
+            
+            logging.info(f"Using Brave Search API explicitly for query: '{query}'")
+            results = await brave_web_search(query, num_results)
+            
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, results)
+                return "I've found some results using Brave Search and will read them to you now."
+            return results
+        except Exception as e:
+            logging.error(f"Error in brave_search: {e}")
+            error_msg = f"I couldn't find any results for '{query}' using Brave Search. Try a different query or search tool."
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, error_msg)
+                return "I couldn't find any results using Brave Search."
+            return error_msg
+    
+    # 2. Bing Search Tool
+    @function_tool
+    async def bing_search(context: RunContext, query: str, num_results: int = 5) -> str:
+        """Search the web using Bing specifically.
+        
+        Args:
+            context: The run context for the tool
+            query: The search query
+            num_results: Number of results to return (1-10)
+            
+        Returns:
+            str: Formatted search results with titles and URLs
+        """
+        try:
+            # Try to import from bing_search.py first (fast version)
+            try:
+                from bing_search import bing_search as bing_search_fast
+                logging.info(f"Using fast Bing search for query: '{query}'")
+                return await bing_search_fast(context, query, num_results)
+            except ImportError:
+                # Try to import from bing_extended.py (quality version)
+                try:
+                    from bing_extended import bing_search as bing_search_quality
+                    logging.info(f"Using quality Bing search for query: '{query}'")
+                    return await bing_search_quality(context, query, num_results)
+                except ImportError:
+                    return "Bing Search is not available. Please try another search tool."
+        except Exception as e:
+            logging.error(f"Error in bing_search: {e}")
+            error_msg = f"I couldn't find any results for '{query}' using Bing Search. Try a different query or search tool."
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, error_msg)
+                return "I couldn't find any results using Bing Search."
+            return error_msg
+    
+    # 3. DuckDuckGo Search Tool
+    @function_tool
+    async def duckduckgo_search(context: RunContext, query: str, num_results: int = 5) -> str:
+        """Search the web using DuckDuckGo specifically.
+        
+        Args:
+            context: The run context for the tool
+            query: The search query
+            num_results: Number of results to return (1-10)
+            
+        Returns:
+            str: Formatted search results with titles and URLs
+        """
+        try:
+            # Try to import from duckduckgo_search.py
+            try:
+                from duckduckgo_search import ddg_web_search
+                logging.info(f"Using DuckDuckGo search for query: '{query}'")
+                results = await ddg_web_search(query, num_results)
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, results)
+                    return "I've found some results using DuckDuckGo and will read them to you now."
+                return results
+            except ImportError:
+                return "DuckDuckGo Search is not available. Please try another search tool."
+        except Exception as e:
+            logging.error(f"Error in duckduckgo_search: {e}")
+            error_msg = f"I couldn't find any results for '{query}' using DuckDuckGo Search. Try a different query or search tool."
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, error_msg)
+                return "I couldn't find any results using DuckDuckGo Search."
+            return error_msg
+    
+    # 4. Google Search Tool
+    @function_tool
+    async def google_search(context: RunContext, query: str, num_results: int = 5) -> str:
+        """Search the web using Google specifically.
+        
+        Args:
+            context: The run context for the tool
+            query: The search query
+            num_results: Number of results to return (1-10)
+            
+        Returns:
+            str: Formatted search results with titles and URLs
+        """
+        try:
+            # Try to import from googlesearch
+            try:
+                from googlesearch import search as google_search_func
+                logging.info(f"Using Google search for query: '{query}'")
+                
+                # Ensure query is a string
+                if not isinstance(query, str):
+                    query = str(query)
+                    
+                # Ensure num_results is an integer
+                if not isinstance(num_results, int):
+                    try:
+                        num_results = int(num_results)
+                    except (ValueError, TypeError):
+                        num_results = 5
+                
+                # Limit number of results to a reasonable range
+                num_results = max(1, min(num_results, 10))
+                
+                # Run in executor to avoid blocking
+                loop = asyncio.get_event_loop()
+                results_list = await loop.run_in_executor(
+                    None,
+                    lambda: list(google_search_func(query, num_results=num_results))
+                )
+                
+                if not results_list:
+                    return f"No results found for '{query}' on Google."
+                
+                formatted = f"Google search results for '{query}':\n\n"
+                
+                for i, result in enumerate(results_list, 1):
+                    formatted += f"{i}. {result}\n\n"
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, formatted)
+                    return "I've found some results using Google and will read them to you now."
+                return formatted
+            except ImportError:
+                return "Google Search is not available. Please try another search tool."
+        except Exception as e:
+            logging.error(f"Error in google_search: {e}")
+            error_msg = f"I couldn't find any results for '{query}' using Google Search. Try a different query or search tool."
+            session = getattr(context, 'session', None)
+            if session:
+                await handle_tool_results(session, error_msg)
+                return "I couldn't find any results using Google Search."
+            return error_msg
+    
     # Define the web_search function based on available search methods
-    if HAS_FALLBACK_SEARCH:
-        # Use the unified fallback search system
+    if HAS_BRAVE_SEARCH:
+        # Use Brave Search API as the primary search method
         @function_tool
         async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
-            """Search the web for information using multiple search engines with automatic fallback.
+            """Search the web for information using Brave Search API.
             
             Args:
                 context: The run context for the tool
@@ -603,10 +798,37 @@ async def entrypoint(ctx: JobContext):
             try:
                 if not isinstance(query, str):
                     query = str(query)
-                results = await unified_web_search(context, query, num_results)
+                
+                # Ensure num_results is an integer
+                if not isinstance(num_results, int):
+                    try:
+                        num_results = int(num_results)
+                    except (ValueError, TypeError):
+                        num_results = 5
+                
+                # Limit number of results to a reasonable range
+                num_results = max(1, min(num_results, 10))
+                
+                logging.info(f"Using Brave Search API for query: '{query}'")
+                results = await brave_web_search(query, num_results)
+                
+                session = getattr(context, 'session', None)
+                if session:
+                    await handle_tool_results(session, results)
+                    return "I've found some results using Brave Search and will read them to you now."
                 return results
             except Exception as e:
-                logging.error(f"Error in web_search using unified fallback system: {e}")
+                logging.error(f"Error in web_search using Brave Search API: {e}")
+                
+                # If Brave Search fails and fallback system is available, use it
+                if HAS_FALLBACK_SEARCH:
+                    try:
+                        logging.info(f"Brave Search failed, using fallback search system for query: '{query}'")
+                        results = await fallback_search(context, query, num_results)
+                        return results
+                    except Exception as fallback_error:
+                        logging.error(f"Fallback search error: {fallback_error}")
+                
                 error_msg = f"I couldn't find any results for '{query}'. Try a different query."
                 session = getattr(context, 'session', None)
                 if session:
@@ -626,7 +848,15 @@ async def entrypoint(ctx: JobContext):
             Returns:
                 str: Formatted search results with titles and URLs
             """
-            # Use more results for fallback search
+            # If fallback search system is available, use it
+            if HAS_FALLBACK_SEARCH:
+                try:
+                    logging.info(f"Using fallback search system for query: '{query}'")
+                    return await fallback_search(context, query, max(num_results, 10))
+                except Exception as e:
+                    logging.error(f"Fallback search error: {e}")
+            
+            # Otherwise, just use the primary web_search with more results
             return await web_search(context, query, max(num_results, 10))
     
     elif HAS_BRAVE_SEARCH:
@@ -749,45 +979,91 @@ async def entrypoint(ctx: JobContext):
     # Add the web search tools to the list
     web_search_tools = [web_search, fallback_web_search]
     
-    # Register all the tools with the agent
-    tools_to_register = [
-        # Time and date tools
-        get_current_time,
-        get_current_date,
-        get_current_date_and_timezone,
-        
-        # Weather and news tools
-        get_weather,
-        get_news,
-        
-        # Math calculation tool (merged)
-        calculate,
-        
-        # Fun content tools
-        get_fun_content,
-        
-        # Web tools
-        take_screenshot,
-        clean_html,
-        extract_links,
-        open_website,
-        
-        # Search tools
-        google_search,
-        wikipedia_search,
-        wiki_lookup,
-        
-        # Job search tools
-        indeed_job_search,
-        search_locanto,
-    ]
+    # Initialize agent with MCP tools
+    agent = FunctionAgent()
     
-    if HAS_BRAVE_SEARCH:
-        tools_to_register.append(web_search)
-        tools_to_register.append(fallback_web_search)
+    # Check if local tools are enabled
+    local_tools_enabled = os.environ.get("LOCAL_TOOLS", "true").lower() in ("true", "1", "yes")
+    
+    # Initialize tools list
+    tools_to_register = []
+    
+    # Register local tools if enabled
+    if local_tools_enabled:
+        logging.info("Local tools are enabled")
+        tools_to_register.extend([
+            get_current_time,
+            get_current_date,
+            get_current_date_and_timezone,
+            
+            # Weather and news tools
+            get_weather,
+            get_news,
+            
+            # Math calculation tool
+            calculate,
+            
+            # Fun content tools
+            get_fun_content,
+            
+            # Web tools
+            take_screenshot,
+            clean_html,
+            extract_links,
+            open_website,
+            
+            # Search tools
+            wikipedia_search,
+            wiki_lookup,
+            
+            # Job search tools (if enabled)
+            *([indeed_job_search] if os.environ.get("INDEED_ENABLE", "true").lower() in ("true", "1", "yes") else []),
+            *([search_locanto] if os.environ.get("LOCANTO_ENABLE", "true").lower() in ("true", "1", "yes") else [])
+        ])
     else:
-        tools_to_register.append(web_search)
-        tools_to_register.append(fallback_web_search)
+        logging.info("Local tools are disabled via environment variable")
+    
+    # Add the main web search tools
+    tools_to_register.append(web_search)
+    tools_to_register.append(fallback_web_search)
+    
+    # Add the individual provider-specific search tools based on environment variables
+    brave_search_enabled = os.environ.get("BRAVE_SEARCH_ENABLE", "true").lower() in ("true", "1", "yes")
+    bing_search_enabled = os.environ.get("BING_SEARCH_ENABLE", "true").lower() in ("true", "1", "yes")
+    duckduckgo_search_enabled = os.environ.get("DUCKDUCKGO_SEARCH_ENABLE", "true").lower() in ("true", "1", "yes")
+    google_search_enabled = os.environ.get("GOOGLE_SEARCH_ENABLE", "true").lower() in ("true", "1", "yes")
+    wikipedia_enabled = os.environ.get("WIKIPEDIA_ENABLE", "true").lower() in ("true", "1", "yes")
+    
+    # Check job search tool status
+    indeed_enabled = os.environ.get("INDEED_ENABLE", "true").lower() in ("true", "1", "yes")
+    locanto_enabled = os.environ.get("LOCANTO_ENABLE", "true").lower() in ("true", "1", "yes")
+    
+    # Log job search tool status
+    if indeed_enabled:
+        logging.info("Indeed job search tool is enabled")
+    else:
+        logging.info("Indeed job search tool is disabled via environment variable")
+        
+    if locanto_enabled:
+        logging.info("Locanto search tool is enabled")
+    else:
+        logging.info("Locanto search tool is disabled via environment variable")
+    
+    if brave_search_enabled:
+        tools_to_register.append(brave_search)
+        logging.info("Brave Search tool enabled")
+    
+    if bing_search_enabled:
+        tools_to_register.append(bing_search)
+        logging.info("Bing Search tool enabled")
+    
+    if duckduckgo_search_enabled:
+        tools_to_register.append(duckduckgo_search)
+        logging.info("DuckDuckGo Search tool enabled")
+    
+    if google_search_enabled:
+        tools_to_register.append(google_search)
+        logging.info("Google Search tool enabled")
     
     if HAS_LOCANTO_UTILS:
         tools_to_register.append(basic_search_locanto)
@@ -800,43 +1076,50 @@ async def entrypoint(ctx: JobContext):
     
     logging.info("Created agent with local tools")
     
+    # Initialize tool sources list
     tool_sources = ["Local"]
     
+    # Check if MCP_CLIENT is enabled and ZAPIER_MCP_URL is set
+    mcp_client_enabled = os.environ.get("MCP_CLIENT", "false").lower() in ("true", "1", "yes")
     zapier_mcp_url = os.environ.get("ZAPIER_MCP_URL")
-    if zapier_mcp_url and zapier_mcp_url.strip():
-        logging.info(f"Found Zapier MCP URL, attempting to connect")
-        try:
-            mcp_server = MCPServerSse(
-                params={"url": zapier_mcp_url},
-                cache_tools_list=True,
-                name="Zapier MCP Server"
-            )
-            
-            await mcp_server.connect()
-            
-            available_tools = await mcp_server.list_tools()
-            logging.info(f"Found {len(available_tools)} tools on Zapier MCP server")
-            
-            if available_tools:
-                mcp_tools = await MCPToolsIntegration.register_with_agent(
-                    agent=agent,
-                    mcp_servers=[mcp_server],
-                    convert_schemas_to_strict=True,
-                    auto_connect=False
+    
+    if mcp_client_enabled:
+        if zapier_mcp_url and zapier_mcp_url.strip():
+            logging.info(f"MCP_CLIENT is enabled and Zapier MCP URL found, attempting to connect")
+            try:
+                mcp_server = MCPServerSse(
+                    params={"url": zapier_mcp_url},
+                    cache_tools_list=True,
+                    name="Zapier MCP Server"
                 )
-                logging.info(f"Successfully registered {len(mcp_tools)} MCP tools from Zapier")
-                tool_sources.append("Zapier MCP")
                 
-                tool_names = [getattr(t, '__name__', str(t)) for t in mcp_tools]
-                logging.info(f"Registered MCP tool names: {', '.join(tool_names)}")
-            else:
-                logging.warning("No tools found on the Zapier MCP server")
-        except Exception as e:
-            import traceback
-            logging.error(f"Failed to register MCP tools: {e}")
-            logging.debug(traceback.format_exc())
+                await mcp_server.connect()
+                
+                available_tools = await mcp_server.list_tools()
+                logging.info(f"Found {len(available_tools)} tools on Zapier MCP server")
+                
+                if available_tools:
+                    mcp_tools = await MCPToolsIntegration.register_with_agent(
+                        agent=agent,
+                        mcp_servers=[mcp_server],
+                        convert_schemas_to_strict=True,
+                        auto_connect=False
+                    )
+                    logging.info(f"Successfully registered {len(mcp_tools)} MCP tools from Zapier")
+                    tool_sources.append("Zapier MCP")
+                    tool_names = [getattr(t, '__name__', str(t)) for t in mcp_tools]
+                    logging.info(f"Registered MCP tool names: {', '.join(tool_names)}")
+                else:
+                    logging.warning("No tools found on Zapier MCP server")
+            except Exception as e:
+                import traceback
+                logging.error(f"Failed to register MCP tools: {e}")
+                logging.debug(traceback.format_exc())
+                logging.warning("MCP tools will not be available")
+        else:
+            logging.warning("MCP_CLIENT is enabled but no ZAPIER_MCP_URL found in environment variables. MCP tools will not be available.")
     else:
-        logging.warning("No ZAPIER_MCP_URL found in environment variables. MCP tools will not be available.")
+        logging.info("MCP_CLIENT is disabled, skipping MCP tool registration")
         
     logging.info(f"Agent initialized with tools from: {', '.join(tool_sources)}")
     
@@ -854,16 +1137,22 @@ async def entrypoint(ctx: JobContext):
         
         It is now {current_date}.{brave_info}
         
-        IMPORTANT: When asked to search for information or look something up, ALWAYS use the web_search, 
-        google_search, or wikipedia_search tools. These are the most reliable tools for finding information.
+        IMPORTANT: When asked to search for information or look something up, ALWAYS use the web_search tool by default.
+        The web_search tool automatically prioritizes Brave Search for the best results.
+        
+        You also have access to provider-specific search tools that can be used when explicitly requested:
+        - brave_search: Uses Brave Search API specifically (preferred for most searches)
+        - bing_search: Uses Bing search specifically
+        - duckduckgo_search: Uses DuckDuckGo search specifically
+        - google_search: Uses Google search specifically (use only when explicitly requested)
         
         You have access to tools from the following sources: {tool_sources_str}
         
         Available tools include:
-        - Web search tools (web_search, google_search, wikipedia_search, wiki_lookup)
+        - Web search tools (web_search, fallback_web_search, brave_search, bing_search, duckduckgo_search, google_search, wikipedia_search, wiki_lookup)
         - Time and date tools (get_current_time, get_current_date)
         - Weather and news tools (get_weather, get_news)
-        - Math calculation tools (calculate, calculate_math, evaluate_expression)
+        - Math calculation tools (calculate)
         - Web tools (take_screenshot, clean_html, extract_links, open_website)
         - Fun content (get_fun_content)
         - Job search tools (indeed_job_search, search_locanto)

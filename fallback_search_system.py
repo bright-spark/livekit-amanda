@@ -20,54 +20,80 @@ from typing import List, Dict, Any, Optional, Union
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Check if search engines are enabled via environment variables
+BRAVE_SEARCH_ENABLED = os.environ.get("BRAVE_SEARCH_ENABLE", "true").lower() in ("true", "1", "yes")
+DUCKDUCKGO_SEARCH_ENABLED = os.environ.get("DUCKDUCKGO_SEARCH_ENABLE", "true").lower() in ("true", "1", "yes")
+BING_SEARCH_ENABLED = os.environ.get("BING_SEARCH_ENABLE", "true").lower() in ("true", "1", "yes")
+GOOGLE_SEARCH_ENABLED = os.environ.get("GOOGLE_SEARCH_ENABLE", "true").lower() in ("true", "1", "yes")
+WIKIPEDIA_ENABLED = os.environ.get("WIKIPEDIA_ENABLE", "true").lower() in ("true", "1", "yes")
+
 # Try to import Brave Search
 HAS_BRAVE_SEARCH = False
-try:
-    from brave_search_free_tier import web_search as brave_web_search
-    HAS_BRAVE_SEARCH = True
-    logger.info("Brave Search API available")
-except ImportError:
-    logger.warning("Brave Search API not available")
+if BRAVE_SEARCH_ENABLED:
+    try:
+        from brave_search_free_tier import web_search as brave_web_search
+        HAS_BRAVE_SEARCH = True
+        logger.info("Brave Search API available and enabled")
+    except ImportError:
+        try:
+            # Try alternative import path
+            from brave_search import web_search as brave_web_search
+            HAS_BRAVE_SEARCH = True
+            logger.info("Brave Search API available and enabled (alternative import)")
+        except ImportError:
+            logger.warning("Brave Search API not available")
+else:
+    logger.info("Brave Search API disabled via environment variable")
 
 # Try to import DuckDuckGo Search
 HAS_DUCKDUCKGO = False
-try:
-    from duckduckgo_search import ddg_web_search
-    HAS_DUCKDUCKGO = True
-    logger.info("DuckDuckGo Search available")
-except ImportError:
-    logger.warning("DuckDuckGo Search not available")
+if DUCKDUCKGO_SEARCH_ENABLED:
+    try:
+        from duckduckgo_search import ddg_web_search
+        HAS_DUCKDUCKGO = True
+        logger.info("DuckDuckGo Search available and enabled")
+    except ImportError:
+        logger.warning("DuckDuckGo Search not available")
+else:
+    logger.info("DuckDuckGo Search disabled via environment variable")
 
 # Try to import optimized Bing Search for speed
 HAS_BING_FAST = False
-try:
-    from bing_search import scrape_bing as bing_scrape_fast
-    from bing_search import async_scrape_bing as bing_async_scrape_fast
-    from bing_search import bing_search as bing_search_fast
-    from bing_search import format_bing_results as format_bing_results_fast
-    HAS_BING_FAST = True
-    logger.info("Fast Bing Search available from bing_search.py")
-except ImportError:
-    logger.warning("Fast Bing Search not available")
+if BING_SEARCH_ENABLED:
+    try:
+        from bing_search import scrape_bing as bing_scrape_fast
+        from bing_search import async_scrape_bing as bing_async_scrape_fast
+        from bing_search import bing_search as bing_search_fast
+        from bing_search import format_bing_results as format_bing_results_fast
+        HAS_BING_FAST = True
+        logger.info("Fast Bing Search available and enabled from bing_search.py")
+    except ImportError:
+        logger.warning("Fast Bing Search not available")
 
-# Try to import enriched Bing Search for quality
-HAS_BING_QUALITY = False
-try:
-    from bing_extended import scrape_bing as bing_scrape_quality
-    from bing_extended import bing_search as bing_search_quality
-    HAS_BING_QUALITY = True
-    logger.info("Quality Bing Search available from bing_extended.py")
-except ImportError:
-    logger.warning("Quality Bing Search not available")
+    # Try to import enriched Bing Search for quality
+    HAS_BING_QUALITY = False
+    try:
+        from bing_extended import scrape_bing as bing_scrape_quality
+        from bing_extended import bing_search as bing_search_quality
+        HAS_BING_QUALITY = True
+        logger.info("Quality Bing Search available and enabled from bing_extended.py")
+    except ImportError:
+        logger.warning("Quality Bing Search not available")
+else:
+    logger.info("Bing Search disabled via environment variable")
+    HAS_BING_QUALITY = False
 
 # Try to import Google Search
 HAS_GOOGLE = False
-try:
-    from googlesearch import search as google_search_func
-    HAS_GOOGLE = True
-    logger.info("Google Search available")
-except ImportError:
-    logger.warning("Google Search not available")
+if GOOGLE_SEARCH_ENABLED:
+    try:
+        from googlesearch import search as google_search_func
+        HAS_GOOGLE = True
+        logger.info("Google Search available and enabled")
+    except ImportError:
+        logger.warning("Google Search not available")
+else:
+    logger.info("Google Search disabled via environment variable")
 
 async def format_bing_results(results: List[Dict[str, Any]], query: str) -> str:
     """Format Bing search results into a readable string."""
@@ -186,11 +212,12 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
     
     logger.info(f"Fallback search called for query: '{query}', num_results: {num_results}")
     
-    # Try Brave Search first (if available)
-    if HAS_BRAVE_SEARCH and os.environ.get("BRAVE_API_KEY"):
+    # Try Brave Search first if available and enabled
+    if BRAVE_SEARCH_ENABLED and HAS_BRAVE_SEARCH:
         try:
-            logger.info(f"Trying Brave Search for query: '{query}'")
+            logger.info(f"Trying Brave Search API for query: '{query}'")
             brave_results = await brave_web_search(query, num_results)
+            
             if brave_results and "I couldn't find any results" not in brave_results:
                 logger.info(f"Brave Search succeeded for query: '{query}'")
                 return brave_results
@@ -198,25 +225,51 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
         except Exception as e:
             logger.error(f"Brave Search error: {e}")
     
-    # Try Fast Bing Search as first fallback (optimized for speed)
-    if HAS_BING_FAST:
+    # Try Bing as second fallback if enabled
+    # First try fast Bing search (optimized for speed)
+    if BING_SEARCH_ENABLED and HAS_BING_FAST:
         try:
-            logger.info(f"Trying Fast Bing Search for query: '{query}'")
+            logger.info(f"Trying fast Bing search for query: '{query}'")
             if context:
+                # If we have a context, use the function_tool version
                 bing_results = await bing_search_fast(context, query, num_results)
+                if bing_results and "No results found" not in bing_results:
+                    logger.info(f"Fast Bing search succeeded for query: '{query}'")
+                    return bing_results
             else:
-                results = await bing_async_scrape_fast(query, num_results)
-                bing_results = format_bing_results_fast(results, query)
-                
-            if bing_results and "No results found" not in bing_results and "An error occurred" not in bing_results:
-                logger.info(f"Fast Bing Search succeeded for query: '{query}'")
-                return bing_results
-            logger.warning(f"Fast Bing Search returned no results for query: '{query}'")
+                # Otherwise use the direct scraper
+                bing_results = await bing_async_scrape_fast(query, num_results)
+                if bing_results:
+                    logger.info(f"Fast Bing search succeeded for query: '{query}'")
+                    formatted_results = await format_bing_results(bing_results, query)
+                    return formatted_results
+            logger.warning(f"Fast Bing search returned no results for query: '{query}'")
         except Exception as e:
             logger.error(f"Fast Bing Search error: {e}")
     
-    # Try DuckDuckGo as second fallback
-    if HAS_DUCKDUCKGO:
+    # If fast Bing search fails, try quality Bing search if enabled
+    if BING_SEARCH_ENABLED and HAS_BING_QUALITY:
+        try:
+            logger.info(f"Trying quality Bing search for query: '{query}'")
+            if context:
+                # If we have a context, use the function_tool version
+                bing_results = await bing_search_quality(context, query, num_results)
+                if bing_results and "No results found" not in bing_results:
+                    logger.info(f"Quality Bing search succeeded for query: '{query}'")
+                    return bing_results
+            else:
+                # Otherwise use the direct scraper
+                bing_results = await bing_scrape_quality(query, num_results)
+                if bing_results:
+                    logger.info(f"Quality Bing search succeeded for query: '{query}'")
+                    formatted_results = await format_bing_results(bing_results, query)
+                    return formatted_results
+            logger.warning(f"Quality Bing search returned no results for query: '{query}'")
+        except Exception as e:
+            logger.error(f"Quality Bing Search error: {e}")
+    
+    # Try DuckDuckGo as first fallback if enabled
+    if DUCKDUCKGO_SEARCH_ENABLED and HAS_DUCKDUCKGO:
         try:
             logger.info(f"Trying DuckDuckGo Search for query: '{query}'")
             ddg_results = await ddg_web_search(query, num_results)
@@ -244,8 +297,8 @@ async def fallback_search(query: str, num_results: int = 5, context=None) -> str
         except Exception as e:
             logger.error(f"Quality Bing Search error: {e}")
     
-    # Try Google as final fallback
-    if HAS_GOOGLE:
+    # Try Google as final fallback if enabled
+    if GOOGLE_SEARCH_ENABLED and HAS_GOOGLE:
         try:
             logger.info(f"Trying Google Search for query: '{query}'")
             google_results = await google_web_search(query, num_results)
@@ -277,7 +330,44 @@ async def unified_web_search(context, query: str, num_results: int = 5) -> str:
         if not isinstance(query, str):
             query = str(query)
         
-        results = await fallback_search(query, num_results)
+        # Ensure num_results is an integer
+        if not isinstance(num_results, int):
+            try:
+                num_results = int(num_results)
+            except (ValueError, TypeError):
+                num_results = 5
+        
+        # Limit number of results to a reasonable range
+        num_results = max(1, min(num_results, 20))
+        
+        # ALWAYS try Brave Search first if enabled and available
+        if BRAVE_SEARCH_ENABLED and HAS_BRAVE_SEARCH:
+            try:
+                logger.info(f"Unified web search using Brave Search API for query: '{query}'")
+                brave_results = await brave_web_search(query, num_results)
+                
+                if brave_results and "I couldn't find any results" not in brave_results:
+                    logger.info(f"Brave Search succeeded for query: '{query}'")
+                    
+                    # Handle session output for voice responses if available
+                    session = getattr(context, 'session', None)
+                    if session and hasattr(session, 'add_message'):
+                        await session.add_message(role="assistant", content=brave_results)
+                        return "I've found some results using Brave Search and will read them to you now."
+                    
+                    return brave_results
+                
+                logger.warning(f"Brave Search returned no results for query: '{query}', falling back to other search methods")
+            except Exception as e:
+                logger.error(f"Brave Search error in unified_web_search: {e}")
+        else:
+            if not BRAVE_SEARCH_ENABLED:
+                logger.info("Brave Search API disabled via environment variable, using fallback search methods")
+            else:
+                logger.info("Brave Search API not available, using fallback search methods")
+        
+        # If Brave Search fails or is not available, use the fallback search system
+        results = await fallback_search(query, num_results, context)
         
         # Handle session output for voice responses if available
         session = getattr(context, 'session', None)
