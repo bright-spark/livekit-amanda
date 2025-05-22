@@ -20,10 +20,41 @@ An advanced voice assistant application built using the LiveKit Agents framework
 - REST API with FastAPI for programmatic access to all features
 - Advanced caching system with configurable TTLs and invalidation strategies
 - Statistics tracking for monitoring cache and API performance
+- Local data integration for enhanced RAG capabilities
 
-## Brave Search API Integration
+## Brave Search Integration
 
-The application uses the Brave Search API for web searches and job listings with the following optimizations:
+The application provides multiple implementations for Brave Search to ensure maximum flexibility and reliability:
+
+### 1. Custom API Implementation (`brave_search_api.py`)
+
+Our primary implementation directly interfaces with the Brave Search API without relying on external packages:
+
+- **Direct API Access**: Makes HTTP requests directly to the Brave Search API endpoints
+- **Comprehensive Caching**: Implements both in-memory and disk-based caching
+- **Detailed Results**: Provides rich search results with titles, URLs, and descriptions
+- **Rate Limiting**: Includes configurable rate limiting to stay within API quotas
+
+See the [Brave Search API Documentation](BRAVE_SEARCH_API_README.md) for more details.
+
+### 2. No-API-Key Implementation (`brave_search_nokey.py`)
+
+A fallback implementation that doesn't require an API key, using web scraping techniques:
+
+- **No API Key Required**: Works without any Brave Search API credentials
+- **Web Scraping**: Uses BeautifulSoup to parse Brave Search results from their website
+- **Caching System**: Includes the same caching capabilities as the API implementation
+- **Rate Limiting**: Implements strict rate limiting to avoid detection
+
+See the [Brave Search No-API-Key Documentation](BRAVE_SEARCH_NOKEY_README.md) for more details.
+
+### 3. Free Tier Implementation (`brave_search_free_tier.py`)
+
+Optimized for the free tier of the Brave Search API:
+
+- **Aggressive Caching**: Maximizes cache usage to minimize API calls
+- **Query Preprocessing**: Normalizes queries to improve cache hit rates
+- **Rate Limiting**: Implements strict rate limiting to stay within free tier limits
 
 ### Separate API Keys and Rate Limits
 
@@ -284,12 +315,14 @@ The agent will connect to the specified LiveKit room and start listening for voi
 
 - `agent.py`: Main agent implementation and entrypoint
 - `app.py`: FastAPI application for REST API
+- `data/`: Directory for local documents used in RAG
 - `Dockerfile`: Docker configuration for containerization
 - `docker-compose.yml`: Docker Compose configuration for running the application
 
 ### Brave Search API and Caching
 
 - `brave_search.py`: Unified interface for both Web and AI search functionality
+- `enhanced_search.py`: Advanced search with local data integration and RAG capabilities
 - `brave_web_search.py`: Implementation of Web Search using Brave Search API
 - `brave_ai_search.py`: Implementation of AI Search using Brave Search API
 - `brave_search_stats.py`: Statistics tracking for Brave Search API usage
@@ -321,3 +354,9 @@ The agent will connect to the specified LiveKit room and start listening for voi
 - [LiveKit](https://livekit.io/) for the underlying real-time communication infrastructure
 - [Azure](https://azure.microsoft.com/) for openai, speech-to-text and text-to-speech
 - [Silero](https://github.com/snakers4/silero-vad) for Voice Activity Detection
+
+## Additional Documentation
+
+- [Brave Search API Documentation](BRAVE_SEARCH_API_README.md)
+- [Brave Search No-API-Key Documentation](BRAVE_SEARCH_NOKEY_README.md)
+- [Local Data RAG Documentation](LOCAL_DATA_RAG_README.md)
