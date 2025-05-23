@@ -836,10 +836,11 @@ class AgentStartupOptimizer:
             from brave_search_indeed_optimized import indeed_job_search as indeed_search_func
             
             @function_tool
-            async def indeed_job_search(context: RunContext, query: str = "customer service", location: str = "Johannesburg, Gauteng") -> str:
+            async def indeed_job_search(context: RunContext, query: str = "customer service", location: str = "Johannesburg, Gauteng", max_results: int = 5, include_urls: bool = True) -> str:
                 """Search for jobs on Indeed using Brave Search API or scraping."""
                 try:
-                    results = await indeed_search_func(context, query, location)
+                    # Make sure we pass the parameters correctly
+                    results = await indeed_search_func(query=query, location=location, max_results=max_results, include_urls=include_urls)
                     return results
                 except Exception as e:
                     return f"Error searching Indeed: {str(e)}"
