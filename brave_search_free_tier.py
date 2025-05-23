@@ -894,9 +894,17 @@ async def clear_session_cache() -> None:
 async def cleanup_resources():
     """Clean up all resources when the application is shutting down."""
     try:
+        # Clean up Brave Search resources
         if _brave_search_free_tier is not None:
             await _brave_search_free_tier.shutdown()
             logging.info("Brave Search resources cleaned up successfully")
+            
+        # Explicitly close any sessions that might be open
+        if hasattr(_brave_search_free_tier, 'session') and _brave_search_free_tier.session:
+            if not _brave_search_free_tier.session.closed:
+                await _brave_search_free_tier.session.close()
+                logging.info("Closed Brave Search client session")
+                
     except Exception as e:
         logging.error(f"Error during resource cleanup: {e}")
 
@@ -904,14 +912,50 @@ async def cleanup_resources():
 import atexit
 import asyncio
 
+# Flag to track if session cleanup is available
+_has_session_cleanup = False
+
+# We'll use a lazy import approach for session_cleanup to avoid circular imports
+def _get_session_cleanup():
+    """Lazily import the session_cleanup module to avoid circular imports"""
+    global _has_session_cleanup
+    try:
+        from session_cleanup import sync_cleanup_sessions
+        _has_session_cleanup = True
+        return sync_cleanup_sessions
+    except ImportError:
+        _has_session_cleanup = False
+        logging.warning("session_cleanup module not available, session cleanup may be incomplete")
+        return None
+
 def sync_cleanup():
     """Synchronous wrapper for the async cleanup function."""
     try:
-        loop = asyncio.get_event_loop()
+        # Get or create an event loop
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        # Run the cleanup
         if loop.is_running():
-            loop.create_task(cleanup_resources())
+            future = asyncio.run_coroutine_threadsafe(cleanup_resources(), loop)
+            try:
+                # Wait for a short time to allow cleanup to complete
+                future.result(timeout=5)
+            except asyncio.TimeoutError:
+                logging.warning("Cleanup timed out")
+            except Exception as e:
+                logging.error(f"Error during async cleanup: {e}")
         else:
             loop.run_until_complete(cleanup_resources())
+            
+        # Run session cleanup if available using lazy import
+        sync_cleanup_sessions = _get_session_cleanup()
+        if sync_cleanup_sessions:
+            sync_cleanup_sessions()
+            
     except Exception as e:
         logging.error(f"Error during sync cleanup: {e}")
 

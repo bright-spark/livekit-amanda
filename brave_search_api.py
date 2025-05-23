@@ -403,9 +403,9 @@ class BraveSearchClient:
     """Brave Search API client with configurable optimizations."""
     
     def __init__(self, 
-                 api_key: Optional[str] = None,
-                 enable_cache: Optional[bool] = None,
-                 rate_limit: Optional[int] = None):
+             api_key: Optional[str] = None,
+             enable_cache: Optional[bool] = None,
+             rate_limit: Optional[int] = None):
         """Initialize the Brave Search client.
         
         Args:
@@ -413,18 +413,30 @@ class BraveSearchClient:
             enable_cache: Whether to enable caching. If None, uses the ENABLE_CACHE env var.
             rate_limit: Requests per second (1 for free tier, 20 for paid tier). If None, uses the BRAVE_SEARCH_RATE_LIMIT env var.
         """
-        # Get API key from environment variable if not provided
-        self.api_key = api_key or os.environ.get("BRAVE_WEB_SEARCH_API_KEY") or os.environ.get("BRAVE_API_KEY")
-        if not self.api_key:
-            logger.warning("Brave Search API key not provided and not found in environment variables (BRAVE_WEB_SEARCH_API_KEY or BRAVE_API_KEY)")
+        # Handle API key - if explicitly set to None, don't use environment variables
+        if api_key is None:
+            self.api_key = None
+            logger.warning("Brave Search API key explicitly set to None")
+        else:
+            # Get API key from environment variable if not provided
+            self.api_key = api_key or os.environ.get("BRAVE_WEB_SEARCH_API_KEY") or os.environ.get("BRAVE_API_KEY")
+            if not self.api_key:
+                logger.warning("Brave Search API key not provided and not found in environment variables (BRAVE_WEB_SEARCH_API_KEY or BRAVE_API_KEY)")
+                # Set to None explicitly to ensure consistent behavior
+                self.api_key = None
         
         # API configuration
         self.base_url = "https://api.search.brave.com/res/v1/web/search"
+        
+        # Initialize headers with required values
         self.headers = {
             "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "X-Subscription-Token": self.api_key
+            "Accept-Encoding": "gzip"
         }
+        
+        # Only add the API key to headers if it exists and is not empty
+        if self.api_key:  # This will be False for None, empty string, etc.
+            self.headers["X-Subscription-Token"] = self.api_key
         
         # Use provided values or fall back to environment variables
         self.enable_cache = enable_cache if enable_cache is not None else ENABLE_CACHE
@@ -490,7 +502,8 @@ class BraveSearchClient:
         """
         # Check if API key is available
         if not self.api_key:
-            return {"error": "Brave Search API key is missing. Please set BRAVE_WEB_SEARCH_API_KEY or BRAVE_API_KEY in your .env file."}
+            logger.warning("Brave Search API key is missing. Please set BRAVE_WEB_SEARCH_API_KEY or BRAVE_API_KEY in your .env file.")
+            return {"error": "Brave Search API key is missing", "results": [], "web": {"results": []}, "query": {"query": query}}
             
         # Normalize the query to improve cache hit rate
         normalized_query = " ".join(query.lower().split())
@@ -520,19 +533,46 @@ class BraveSearchClient:
         
         # Make the API request
         try:
+            # Get or create a session
             session = await self.get_session()
             
-            async with session.get(self.base_url, params=params) as response:
+            # Ensure all parameters are valid types to avoid errors
+            sanitized_params = {}
+            for key, value in params.items():
+                if value is None:
+                    logger.warning(f"Parameter {key} is None, using default value")
+                    # Use default values for None parameters
+                    if key == 'q':
+                        sanitized_params[key] = ""
+                    elif key == 'count':
+                        sanitized_params[key] = 10
+                    elif key == 'offset':
+                        sanitized_params[key] = 0
+                    elif key == 'safesearch':
+                        sanitized_params[key] = "moderate"
+                    else:
+                        sanitized_params[key] = ""
+                elif isinstance(value, bool):
+                    # Convert boolean to string
+                    logger.warning(f"Parameter {key} is boolean, converting to string")
+                    sanitized_params[key] = str(value).lower()
+                else:
+                    # Use the value as is
+                    sanitized_params[key] = value
+            
+            # Make the request with sanitized parameters
+            async with session.get(self.base_url, params=sanitized_params) as response:
                 if response.status == 429:
                     # Rate limit hit
                     error_msg = await response.text()
                     logger.error(f"Rate limit exceeded: {error_msg}")
-                    return {"error": "Rate limit exceeded", "details": error_msg}
+                    return {"error": "Rate limit exceeded", "details": error_msg, "results": [], "web": {"results": []}}
                 elif response.status != 200:
                     error_text = await response.text()
                     logger.error(f"Brave Search API error: {response.status} - {error_text}")
-                    return {"error": f"API error: {response.status}", "details": error_text}
+                    return {"error": f"API error: {response.status}", "details": error_text, "results": [], "web": {"results": []}}
                 
+                # Parse the response as JSON
                 result = await response.json()
                 
                 # Cache the result if use_cache is True
@@ -542,10 +582,10 @@ class BraveSearchClient:
                 return result
         except asyncio.TimeoutError:
             logger.error("Request timed out")
-            return {"error": "Request timed out"}
+            return {"error": "Request timed out", "results": [], "web": {"results": []}}
         except Exception as e:
             logger.error(f"Error during Brave search: {str(e)}")
-            return {"error": str(e)}
+            return {"error": str(e), "results": [], "web": {"results": []}}
     
     async def shutdown(self) -> None:
         """Shutdown the client and release resources."""
