@@ -58,19 +58,25 @@ class AgentStartupOptimizer:
         self.utility_tools = []
         self.job_search_tools = []
         
-        # Import flags
-        self.has_brave_search = os.environ.get("BRAVE_SEARCH_ENABLE", "").lower() in ("true", "1", "yes")
-        self.has_bing_search = os.environ.get("BING_SEARCH_ENABLE", "").lower() in ("true", "1", "yes")
-        self.has_duckduckgo = os.environ.get("DUCKDUCKGO_SEARCH_ENABLE", "").lower() in ("true", "1", "yes")
-        self.has_google_search = os.environ.get("GOOGLE_SEARCH_ENABLE", "").lower() in ("true", "1", "yes")
-        self.has_locanto = os.environ.get("LOCANTO_ENABLE", "").lower() in ("true", "1", "yes")
-        self.has_indeed = os.environ.get("INDEED_ENABLE", "").lower() in ("true", "1", "yes")
-        self.has_wikipedia = os.environ.get("WIKIPEDIA_ENABLE", "").lower() in ("true", "1", "yes")
-        self.has_local_tools = os.environ.get("LOCAL_TOOLS", "").lower() in ("true", "1", "yes")
-        self.has_mcp_client = os.environ.get("MCP_CLIENT", "").lower() in ("true", "1", "yes")
-        self.has_openweather = os.environ.get("OPENWEATHER_ENABLE", "").lower() in ("true", "1", "yes")
-        self.has_enhanced_search = os.environ.get("ENHANCED_SEARCH_ENABLE_RAG", "").lower() in ("true", "1", "yes")
-        self.has_background_embedding = os.environ.get("ENABLE_BACKGROUND_EMBEDDING", "").lower() in ("true", "1", "yes")
+        # Import flags - explicitly check for false values to ensure disabled services stay disabled
+        def is_enabled(env_var, default=""):
+            value = os.environ.get(env_var, default).lower()
+            if value in ("false", "0", "no"):
+                return False
+            return value in ("true", "1", "yes")
+        
+        self.has_brave_search = is_enabled("BRAVE_SEARCH_ENABLE")
+        self.has_bing_search = is_enabled("BING_SEARCH_ENABLE")
+        self.has_duckduckgo = is_enabled("DUCKDUCKGO_SEARCH_ENABLE")
+        self.has_google_search = is_enabled("GOOGLE_SEARCH_ENABLE")
+        self.has_locanto = is_enabled("LOCANTO_ENABLE")
+        self.has_indeed = is_enabled("INDEED_ENABLE")
+        self.has_wikipedia = is_enabled("WIKIPEDIA_ENABLE")
+        self.has_local_tools = is_enabled("LOCAL_TOOLS")
+        self.has_mcp_client = is_enabled("MCP_CLIENT")
+        self.has_openweather = is_enabled("OPENWEATHER_ENABLE")
+        self.has_enhanced_search = is_enabled("ENHANCED_SEARCH_ENABLE_RAG")
+        self.has_background_embedding = is_enabled("ENABLE_BACKGROUND_EMBEDDING")
         
         # Track which tools were successfully loaded
         self.loaded_tools = {
@@ -800,6 +806,12 @@ class AgentStartupOptimizer:
     async def load_job_search_tools(self):
         """Load job search tools if enabled."""
         logger.info("Loading job search tools")
+        
+        # Double-check environment variables to ensure we have the latest settings
+        self.has_indeed = os.environ.get("INDEED_ENABLE", "").lower() in ("true", "1", "yes") and os.environ.get("INDEED_ENABLE", "").lower() not in ("false", "0", "no")
+        self.has_locanto = os.environ.get("LOCANTO_ENABLE", "").lower() in ("true", "1", "yes") and os.environ.get("LOCANTO_ENABLE", "").lower() not in ("false", "0", "no")
+        
+        logger.info(f"Job search tools enabled: Indeed={self.has_indeed}, Locanto={self.has_locanto}")
         
         if self.has_indeed:
             await self.register_indeed_search()
