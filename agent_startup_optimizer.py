@@ -294,15 +294,15 @@ class AgentStartupOptimizer:
     async def register_brave_search(self):
         """Register Brave Search tool with the agent."""
         try:
-            # First try the API version (only Brave has an API version)
+            # First try the Quality API version (highest priority)
             try:
-                # Import the brave search API module
+                # Import the brave search quality API module
                 try:
-                    from brave_search_api import brave_web_search
-                    logger.info("Using Brave Search API version")
+                    from brave_search_quality_integration import quality_web_search, get_quality_integration
+                    logger.info("Using Brave Search Quality API version")
                     
                     # Test the function to ensure it's working properly
-                    logger.debug(f"brave_web_search function details: {brave_web_search.__name__}, {brave_web_search.__module__}")
+                    logger.debug(f"quality_web_search function details: {quality_web_search.__name__}, {quality_web_search.__module__}")
                     
                     # Check if API key is available
                     import os
@@ -312,66 +312,82 @@ class AgentStartupOptimizer:
                     else:
                         logger.info("BRAVE_WEB_SEARCH_API_KEY environment variable is set")
                 except Exception as e:
-                    logger.error(f"Error importing brave_web_search: {str(e)}")
-                    raise ImportError(f"Failed to import brave_web_search: {str(e)}")
-                
+                    logger.error(f"Error importing quality_web_search: {str(e)}")
+                    raise ImportError(f"Failed to import quality_web_search: {str(e)}")
+            
                 @function_tool
                 async def brave_search(context: RunContext, query: str, num_results: int = 5) -> str:
-                    """Search the web using Brave Search API specifically."""
+                    """Search the web using Brave Search Quality API specifically."""
                     try:
-                        logger.debug(f"Calling brave_web_search with: query={query}, num_results={num_results}, context={context}")
-                        results = await brave_web_search(query, num_results, context)
+                        logger.debug(f"Calling quality_web_search with: query={query}, num_results={num_results}, context={context}")
+                        results = await quality_web_search(context, query, num_results)
                         return results
                     except Exception as e:
-                        logger.error(f"Error in brave_search function: {str(e)}")
-                        return f"Error searching with Brave: {str(e)}"
-                        
+                        logger.error(f"Error in brave_search function (quality): {str(e)}")
+                        logger.info("Falling back to standard Brave Search API")
+                        raise  # Let it fall back to the next option
+                    
                 # Register the tool with the agent using our duplicate-prevention method
                 try:
                     # Use our new method to update agent tools
                     added_tools = await self.update_agent_tools([brave_search])
                     
                     if added_tools:
-                        logger.info("Added Brave Search tool to agent")
+                        logger.info("Added Brave Search Quality tool to agent")
                         # Notify console
-                        await self.update_agent_instructions(f"Tool added: brave_search - Search the web using Brave Search API specifically")
+                        await self.update_agent_instructions(f"Tool added: brave_search - Search the web using Brave Search Quality API specifically")
                         
                         # Add to our web search tools list
                         self.web_search_tools.append(brave_search)
                         self.loaded_tools["brave_search"] = True
-                        logger.info("Registered Brave Search tool (API version)")
+                        logger.info("Registered Brave Search tool (Quality API version)")
                     else:
-                        logger.info("Brave Search tool already registered")
-                except Exception as e:
-                    logger.error(f"Error adding Brave Search tool: {e}")
-                    logger.warning("Could not add Brave Search tool to agent")
+                        logger.info("Brave Search Quality tool already registered")
                     
-                return  # Successfully registered API version, don't try nokey
-                
-            except ImportError as e:
-                logger.warning(f"Brave Search API not available: {str(e)}")
-                logger.info("Falling back to Brave Search nokey version")
-                
-            # Only try the nokey version if API version failed
-            try:
-                from brave_search_nokey import brave_search as brave_search_func
-                logger.info("Using Brave Search nokey version")
-                logger.debug(f"brave_search_func function details: {brave_search_func.__name__}, {brave_search_func.__module__}")
+                    return  # Successfully registered Quality API version, don't try others
+                except Exception as e:
+                    logger.error(f"Error adding Brave Search Quality tool: {e}")
+                    logger.warning("Could not add Brave Search Quality tool to agent, falling back to standard API")
+                    # Continue to try standard API
             except Exception as e:
-                logger.error(f"Error importing brave_search_nokey: {str(e)}")
-                raise ImportError(f"Failed to import brave_search_nokey: {str(e)}")
+                logger.warning(f"Error setting up Brave Search Quality API: {str(e)}")
+                logger.info("Falling back to standard Brave Search API")
+        except ImportError as e:
+            logger.warning(f"Brave Search Quality API not available: {str(e)}")
+            logger.info("Falling back to standard Brave Search API")
+            
+        # Next try the standard API version
+        try:
+            # Import the brave search API module
+            try:
+                from brave_search_api import brave_web_search
+                logger.info("Using Brave Search API version")
+                
+                # Test the function to ensure it's working properly
+                logger.debug(f"brave_web_search function details: {brave_web_search.__name__}, {brave_web_search.__module__}")
+                
+                # Check if API key is available
+                import os
+                api_key = os.environ.get("BRAVE_WEB_SEARCH_API_KEY")
+                if not api_key:
+                    logger.warning("BRAVE_WEB_SEARCH_API_KEY environment variable not set")
+                else:
+                    logger.info("BRAVE_WEB_SEARCH_API_KEY environment variable is set")
+            except Exception as e:
+                logger.error(f"Error importing brave_web_search: {str(e)}")
+                raise ImportError(f"Failed to import brave_web_search: {str(e)}")
             
             @function_tool
             async def brave_search(context: RunContext, query: str, num_results: int = 5) -> str:
                 """Search the web using Brave Search API specifically."""
                 try:
-                    logger.debug(f"Calling brave_search_func with: context={context}, query={query}, num_results={num_results}")
-                    results = await brave_search_func(context, query, num_results)
+                    logger.debug(f"Calling brave_web_search with: query={query}, num_results={num_results}, context={context}")
+                    results = await brave_web_search(query, num_results, context)
                     return results
                 except Exception as e:
-                    logger.error(f"Error in brave_search function (nokey): {str(e)}")
+                    logger.error(f"Error in brave_search function: {str(e)}")
                     return f"Error searching with Brave: {str(e)}"
-            
+                    
             # Register the tool with the agent using our duplicate-prevention method
             try:
                 # Use our new method to update agent tools
@@ -384,7 +400,8 @@ class AgentStartupOptimizer:
                     
                     # Add to our web search tools list
                     self.web_search_tools.append(brave_search)
-                    logger.info("Registered Brave Search tool")
+                    self.loaded_tools["brave_search"] = True
+                    logger.info("Registered Brave Search tool (API version)")
                 else:
                     logger.info("Brave Search tool already registered")
             except Exception as e:
@@ -659,10 +676,35 @@ class AgentStartupOptimizer:
         @function_tool
         async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
             """Search the web using the best available search engine."""
-            # Prioritize search engines in the specified order: brave API → brave nokey → duckduckgo → google → bing
-            # Only Brave has both API and nokey versions, all others are nokey only
-            
-            # 1. Try Brave Search API version first
+            # Prioritize search engines in the specified order: brave quality API → brave API → brave nokey → duckduckgo → google → bing
+            # Only Brave has quality API, standard API and nokey versions, all others are nokey only
+        
+            # 1. Try Brave Search Quality API version first (highest priority)
+            if self.has_brave_search:
+                try:
+                    try:
+                        from brave_search_quality_integration import quality_web_search
+                        logger.info("web_search using Brave Search Quality API")
+                        logger.debug(f"quality_web_search function details: {quality_web_search.__name__}, {quality_web_search.__module__}")
+                    except ImportError as import_error:
+                        logger.error(f"Error importing quality_web_search in web_search: {str(import_error)}")
+                        raise
+                    
+                    # Check if API key is available
+                    import os
+                    api_key = os.environ.get("BRAVE_WEB_SEARCH_API_KEY")
+                    if not api_key:
+                        logger.warning("BRAVE_WEB_SEARCH_API_KEY environment variable not set in web_search")
+                
+                    logger.debug(f"Calling quality_web_search with: query={query}, num_results={num_results}, context={context}")
+                    results = await quality_web_search(context, query, num_results)
+                    logger.debug(f"Brave Search Quality API returned results: {len(results) if isinstance(results, str) else 'non-string result'}")
+                    return results
+                except Exception as e:
+                    logger.warning(f"Failed to use Brave Search Quality API: {str(e)}")
+                    logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
+        
+            # 2. Try Brave Search API version next
             if self.has_brave_search:
                 try:
                     try:
@@ -687,7 +729,7 @@ class AgentStartupOptimizer:
                     logger.warning(f"Failed to use Brave Search API: {str(e)}")
                     logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
             
-            # 2. Try Brave Search nokey version
+            # 3. Try Brave Search nokey version
             if self.has_brave_search:
                 try:
                     try:
@@ -706,7 +748,7 @@ class AgentStartupOptimizer:
                     logger.warning(f"Failed to use Brave Search nokey: {str(e)}")
                     logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
             
-            # 3. Try DuckDuckGo nokey version
+            # 4. Try DuckDuckGo nokey version
             if self.has_duckduckgo:
                 try:
                     # First try the official package
@@ -743,7 +785,7 @@ class AgentStartupOptimizer:
                     logger.warning(f"Failed to use DuckDuckGo nokey: {str(e)}")
                     logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
             
-            # 4. Try Google Search nokey version
+            # 5. Try Google Search nokey version
             if self.has_google_search:
                 try:
                     try:
@@ -762,7 +804,7 @@ class AgentStartupOptimizer:
                     logger.warning(f"Failed to use Google Search nokey: {str(e)}")
                     logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
                     
-            # 5. Try Bing Search nokey version
+            # 6. Try Bing Search nokey version
             if self.has_bing_search:
                 try:
                     try:
@@ -907,36 +949,66 @@ class AgentStartupOptimizer:
             logger.warning("Locanto search not available")
             
     async def load_enhanced_search(self):
-        """Load enhanced search with RAG if enabled."""
-        logger.info("Loading enhanced search with RAG")
-        
+        """Load enhanced search with RAG capabilities."""
         try:
-            # Import enhanced search module
-            from enhanced_search import setup_enhanced_search, data_manager
+            logger.info("Loading enhanced search with RAG")
             
-            # Setup enhanced search
+            # Import the enhanced search module
+            try:
+                from enhanced_search import setup_enhanced_search, data_manager
+                logger.info("Imported enhanced search module")
+            except ImportError as e:
+                logger.error(f"Error importing enhanced search module: {e}")
+                return
+            
+            # Set up enhanced search
             enhanced_search_tools = await setup_enhanced_search(self.agent)
             
-            # Start background embedding if enabled
-            if self.has_background_embedding and not self.background_embedding_started:
-                # Start background embedding process
-                logger.info("Starting background embedding process")
-                asyncio.create_task(data_manager.start_background_embedding())
-                self.background_embedding_started = True
+            # Import and set up Brave Search Quality RAG integration if available
+            try:
+                from brave_search_quality_rag_integration import get_integration, process_data_directory
+                logger.info("Imported Brave Search Quality RAG integration")
+                
+                # Initialize the integration
+                integration = get_integration()
+                logger.info("Initialized Brave Search Quality RAG integration")
+                
+                # Process data directory in the background
+                asyncio.create_task(process_data_directory())
+                logger.info("Started processing data directory for RAG integration")
+            except ImportError as e:
+                logger.warning(f"Brave Search Quality RAG integration not available: {e}")
             
-            # Update instructions to reflect enhanced search
-            if self.has_enhanced_search:
-                await self.update_agent_instructions("Enhanced search with RAG loaded: You can now search through local knowledge base")
+            if enhanced_search_tools:
+                logger.info(f"Added {len(enhanced_search_tools)} enhanced search tools")
+                
+                # Start background embedding if enabled
+                if self.has_background_embedding and not self.background_embedding_started:
+                    logger.info("Starting background embedding process")
+                    # Start background embedding in a non-blocking way
+                    asyncio.create_task(data_manager.start_background_embedding())
+                    self.background_embedding_started = True
+                    self.loaded_tools["background_embedding"] = True
             else:
-                await self.update_agent_instructions("Enhanced search with RAG is not enabled")
-            
-            # Mark enhanced search as loaded
+                logger.warning("No enhanced search tools were added")
+                
             self.enhanced_search_loaded = True
-            self.tool_sources.append("Enhanced Search with RAG")
+            self.tool_sources.append("Enhanced Search")
             
-            logger.info("Enhanced search with RAG loaded successfully")
-        except ImportError:
-            logger.warning("Enhanced search with RAG not available")
+        except Exception as e:
+            logger.error(f"Error loading enhanced search: {e}")
+            logger.warning("Enhanced search could not be loaded")
+
+        # Update instructions to reflect enhanced search
+        if self.has_enhanced_search:
+            await self.update_agent_instructions("Enhanced search with RAG loaded: You can now search through local knowledge base")
+        else:
+            await self.update_agent_instructions("Enhanced search with RAG is not enabled")
+            
+        # Mark enhanced search as loaded
+        self.enhanced_search_loaded = True
+        self.tool_sources.append("Enhanced Search with RAG")
+        logger.info("Enhanced search with RAG loaded successfully")
         
         # Load MCP tools next if enabled
         if self.has_mcp_client:
