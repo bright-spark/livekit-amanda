@@ -51,9 +51,9 @@ class BraveSearchClient:
         Args:
             api_key: Brave Search API key. If not provided, will try to get from environment variable.
         """
-        self.api_key = api_key or os.environ.get("BRAVE_API_KEY")
+        self.api_key = api_key or os.environ.get("BRAVE_WEB_SEARCH_API_KEY")
         if not self.api_key:
-            logging.warning("No Brave API key provided. Please set BRAVE_API_KEY environment variable or pass it to the constructor.")
+            logging.warning("No Brave API key provided. Please set BRAVE_WEB_SEARCH_API_KEY environment variable or pass it to the constructor.")
         
         self.base_url = "https://api.search.brave.com/res/v1/web/search"
         self.headers = {

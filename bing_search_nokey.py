@@ -21,12 +21,95 @@ from urllib.parse import quote_plus, urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
+from livekit.agents import RunContext
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
 # Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Simple in-memory cache
+_cache = {}
+_cache_ttl = 3600  # 1 hour in seconds
+
+async def bing_search(context: RunContext, query: str, num_results: int = 5) -> str:
+    """Search the web using Bing Search without requiring an API key.
+    
+    Args:
+        context: The run context from the agent
+        query: The search query string
+        num_results: Maximum number of results to return
+        
+    Returns:
+        A formatted string containing search results
+    """
+    logger.info(f"Performing Bing search (nokey) for: {query}")
+    
+    # Check cache first
+    cache_key = f"bing_nokey:{query}:{num_results}"
+    if cache_key in _cache:
+        logger.info(f"Cache hit for query: {query}")
+        return _cache[cache_key]
+    
+    try:
+        # Respect rate limits
+        await asyncio.sleep(1.0 + random.random())
+        
+        # Prepare the search URL
+        search_url = f"https://www.bing.com/search?q={quote_plus(query)}"
+        
+        # Make the request
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, headers=headers) as response:
+                if response.status != 200:
+                    return f"Error: Bing Search returned status code {response.status}"
+                
+                html = await response.text()
+                
+                # Parse the HTML
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Extract search results
+                results = []
+                search_results = soup.select('.b_algo')
+                
+                for i, result in enumerate(search_results):
+                    if i >= num_results:
+                        break
+                        
+                    title_elem = result.select_one('h2 a')
+                    url_elem = result.select_one('h2 a')
+                    desc_elem = result.select_one('.b_caption p')
+                    
+                    title = title_elem.get_text() if title_elem else "No title"
+                    url = url_elem['href'] if url_elem and 'href' in url_elem.attrs else "No URL"
+                    description = desc_elem.get_text() if desc_elem else "No description"
+                    
+                    results.append(f"Title: {title}\nURL: {url}\nDescription: {description}\n")
+                
+                formatted_results = "\n".join(results) if results else "No results found."
+                
+                # Cache results
+                _cache[cache_key] = formatted_results
+                
+                return formatted_results
+    except Exception as e:
+        logger.error(f"Error in Bing search (nokey): {str(e)}")
+        return f"Error performing search: {str(e)}"
+
+# Rest of the implementation
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'

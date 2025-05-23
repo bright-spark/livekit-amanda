@@ -998,18 +998,35 @@ async def basic_search_locanto(context: RunContext, query: str, location: str = 
 @function_tool
 async def search_locanto(context: RunContext, category_path: str = 'personals/men-seeking-men', location: str = 'western-cape', max_pages: int = 3, return_url: bool = False) -> str:
     try:
-        from brave_search import get_brave_search_client
-        
-        # Build a more specific query for Brave Search
-        search_query = category_path.replace('/', ' ')
-        if location:
-            search_query += f" {location}"
-        
-        # Add site restriction to focus on Locanto
-        search_query += " site:locanto.co.za"
-        
-        # Get the Brave Search client and perform the search
-        brave_client = get_brave_search_client()
+        # Import the correct Brave Search client
+        try:
+            from brave_web_search import get_brave_web_search_client
+            # Build a more specific query for Brave Search
+            search_query = category_path.replace('/', ' ')
+            if location:
+                search_query += f" {location}"
+            
+            # Add site restriction to focus on Locanto
+            search_query += " site:locanto.co.za"
+            
+            # Get the Brave Web Search client and perform the search
+            brave_client = await get_brave_web_search_client()
+            logging.info("Using Brave Web Search client for Locanto search")
+        except ImportError:
+            # Fallback to the unified client if web search module is not available
+            from brave_search_api import get_brave_search_client
+            
+            # Build a more specific query for Brave Search
+            search_query = category_path.replace('/', ' ')
+            if location:
+                search_query += f" {location}"
+            
+            # Add site restriction to focus on Locanto
+            search_query += " site:locanto.co.za"
+            
+            # Get the Brave Search client and perform the search
+            brave_client = await get_brave_search_client()
+            logging.info("Using fallback Brave Search client for Locanto search")
         
         # Calculate total results to fetch based on max_pages (assuming 10 results per page)
         count = min(max_pages * 10, 20)  # Brave API has a max of 20 results per request

@@ -28,6 +28,7 @@ pydantic
 
 # Utilities
 python-dotenv
+setuptools
 pytz
 geopy
 

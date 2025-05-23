@@ -49,6 +49,9 @@ class AgentStartupOptimizer:
         self.enhanced_search_loaded = False
         self.background_embedding_started = False
         
+        # Track registered tools to prevent duplicates
+        self.registered_tool_names = set()  # Set of tool names that have been registered
+        
         # Tool collections
         self.web_search_tools = []
         self.time_date_tools = []
@@ -68,6 +71,22 @@ class AgentStartupOptimizer:
         self.has_openweather = os.environ.get("OPENWEATHER_ENABLE", "").lower() in ("true", "1", "yes")
         self.has_enhanced_search = os.environ.get("ENHANCED_SEARCH_ENABLE_RAG", "").lower() in ("true", "1", "yes")
         self.has_background_embedding = os.environ.get("ENABLE_BACKGROUND_EMBEDDING", "").lower() in ("true", "1", "yes")
+        
+        # Track which tools were successfully loaded
+        self.loaded_tools = {
+            "brave_search": False,
+            "bing_search": False,
+            "duckduckgo_search": False,
+            "google_search": False,
+            "locanto": False,
+            "indeed": False,
+            "wikipedia": False,
+            "local_tools": False,
+            "mcp_client": False,
+            "openweather": False,
+            "enhanced_search_rag": False,
+            "background_embedding": False
+        }
         
         logger.info(f"Agent startup optimizer initialized with feature flags:")
         logger.info(f"  Brave Search: {self.has_brave_search}")
@@ -98,10 +117,31 @@ class AgentStartupOptimizer:
         
         # Step 1: Make the agent responsive with minimal instructions
         await self.make_agent_responsive()
-        
-        # Step 2: Load basic tools in the background
-        asyncio.create_task(self.load_basic_tools())
-        
+
+        # Step 2: Load basic tools synchronously
+        await self.load_basic_tools()
+
+        # Step 3: Load search tools synchronously
+        await self.load_search_tools()
+
+        # Optionally, load job search tools synchronously as well
+        await self.load_job_search_tools()
+
+        # --- Ensure all tools are registered ---
+        all_tools = []
+        if hasattr(self, "time_date_tools"):
+            all_tools.extend(self.time_date_tools)
+        if hasattr(self, "web_search_tools"):
+            all_tools.extend(self.web_search_tools)
+        if hasattr(self, "job_search_tools"):
+            all_tools.extend(self.job_search_tools)
+        if hasattr(self, "utility_tools"):
+            all_tools.extend(self.utility_tools)
+        # Add other tool lists if present
+
+        await self.agent.update_tools(all_tools)
+        logger.info(f"Final tool list registered: {[getattr(t, '__name__', str(t)) for t in all_tools]}")
+
         return self.agent
     
     async def make_agent_responsive(self):
@@ -130,16 +170,14 @@ class AgentStartupOptimizer:
         
         # Add basic time and date tools
         await self.register_time_date_tools()
-        
+
         # Update instructions to reflect basic tools
         await self.update_agent_instructions("Basic tools loaded")
-        
+
         # Mark basic tools as loaded
         self.basic_tools_loaded = True
         self.tool_sources.append("Basic Tools")
-        
-        # Load search tools next
-        asyncio.create_task(self.load_search_tools())
+
         
     async def register_time_date_tools(self):
         """
@@ -223,10 +261,10 @@ class AgentStartupOptimizer:
         
         if self.has_duckduckgo:
             await self.register_duckduckgo_search()
-        
+            
         if self.has_google_search:
             await self.register_google_search()
-        
+            
         if self.has_wikipedia:
             await self.register_wikipedia_search()
         
@@ -234,7 +272,7 @@ class AgentStartupOptimizer:
         await self.register_web_search()
         
         # Update instructions to reflect search tools
-        tool_names = [tool.__name__ for tool in self.web_search_tools]
+        tool_names = [getattr(tool, '__name__', str(tool)) for tool in self.web_search_tools]
         if tool_names:
             await self.update_agent_instructions(f"Search tools loaded: {', '.join(tool_names)}")
         else:
@@ -250,76 +288,141 @@ class AgentStartupOptimizer:
     async def register_brave_search(self):
         """Register Brave Search tool with the agent."""
         try:
-            # Import the brave search module
-            from brave_search_api import brave_web_search
+            # First try the API version (only Brave has an API version)
+            try:
+                # Import the brave search API module
+                try:
+                    from brave_search_api import brave_web_search
+                    logger.info("Using Brave Search API version")
+                    
+                    # Test the function to ensure it's working properly
+                    logger.debug(f"brave_web_search function details: {brave_web_search.__name__}, {brave_web_search.__module__}")
+                    
+                    # Check if API key is available
+                    import os
+                    api_key = os.environ.get("BRAVE_WEB_SEARCH_API_KEY")
+                    if not api_key:
+                        logger.warning("BRAVE_WEB_SEARCH_API_KEY environment variable not set")
+                    else:
+                        logger.info("BRAVE_WEB_SEARCH_API_KEY environment variable is set")
+                except Exception as e:
+                    logger.error(f"Error importing brave_web_search: {str(e)}")
+                    raise ImportError(f"Failed to import brave_web_search: {str(e)}")
+                
+                @function_tool
+                async def brave_search(context: RunContext, query: str, num_results: int = 5) -> str:
+                    """Search the web using Brave Search API specifically."""
+                    try:
+                        logger.debug(f"Calling brave_web_search with: query={query}, num_results={num_results}, context={context}")
+                        results = await brave_web_search(query, num_results, context)
+                        return results
+                    except Exception as e:
+                        logger.error(f"Error in brave_search function: {str(e)}")
+                        return f"Error searching with Brave: {str(e)}"
+                        
+                # Register the tool with the agent using our duplicate-prevention method
+                try:
+                    # Use our new method to update agent tools
+                    added_tools = await self.update_agent_tools([brave_search])
+                    
+                    if added_tools:
+                        logger.info("Added Brave Search tool to agent")
+                        # Notify console
+                        await self.update_agent_instructions(f"Tool added: brave_search - Search the web using Brave Search API specifically")
+                        
+                        # Add to our web search tools list
+                        self.web_search_tools.append(brave_search)
+                        self.loaded_tools["brave_search"] = True
+                        logger.info("Registered Brave Search tool (API version)")
+                    else:
+                        logger.info("Brave Search tool already registered")
+                except Exception as e:
+                    logger.error(f"Error adding Brave Search tool: {e}")
+                    logger.warning("Could not add Brave Search tool to agent")
+                    
+                return  # Successfully registered API version, don't try nokey
+                
+            except ImportError as e:
+                logger.warning(f"Brave Search API not available: {str(e)}")
+                logger.info("Falling back to Brave Search nokey version")
+                
+            # Only try the nokey version if API version failed
+            try:
+                from brave_search_nokey import brave_search as brave_search_func
+                logger.info("Using Brave Search nokey version")
+                logger.debug(f"brave_search_func function details: {brave_search_func.__name__}, {brave_search_func.__module__}")
+            except Exception as e:
+                logger.error(f"Error importing brave_search_nokey: {str(e)}")
+                raise ImportError(f"Failed to import brave_search_nokey: {str(e)}")
             
             @function_tool
             async def brave_search(context: RunContext, query: str, num_results: int = 5) -> str:
                 """Search the web using Brave Search API specifically."""
                 try:
-                    results = await brave_web_search(query, num_results)
+                    logger.debug(f"Calling brave_search_func with: context={context}, query={query}, num_results={num_results}")
+                    results = await brave_search_func(context, query, num_results)
                     return results
                 except Exception as e:
+                    logger.error(f"Error in brave_search function (nokey): {str(e)}")
                     return f"Error searching with Brave: {str(e)}"
             
-            # Register the tool with the agent using the proper update_tools method
+            # Register the tool with the agent using our duplicate-prevention method
             try:
-                # Get current tools
-                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                # Use our new method to update agent tools
+                added_tools = await self.update_agent_tools([brave_search])
                 
-                # Add our new tool
-                all_tools = list(current_tools) + [brave_search]
-                
-                # Update the agent's tools
-                await self.agent.update_tools(all_tools)
-                
-                logger.info("Added Brave Search tool to agent")
-                # Notify console
-                await self.update_agent_instructions(f"Tool added: brave_search - Search the web using Brave Search API specifically")
+                if added_tools:
+                    logger.info("Added Brave Search tool to agent")
+                    # Notify console
+                    await self.update_agent_instructions(f"Tool added: brave_search - Search the web using Brave Search API specifically")
+                    
+                    # Add to our web search tools list
+                    self.web_search_tools.append(brave_search)
+                    logger.info("Registered Brave Search tool")
+                else:
+                    logger.info("Brave Search tool already registered")
             except Exception as e:
                 logger.error(f"Error adding Brave Search tool: {e}")
                 logger.warning("Could not add Brave Search tool to agent")
-            
-            self.web_search_tools.append(brave_search)
-            
+                
             logger.info("Registered Brave Search tool")
         except ImportError:
             logger.warning("Brave Search API not available")
+            self.loaded_tools["brave_search"] = False
             
     async def register_bing_search(self):
-        """Register Bing Search tool with the agent."""
+        """Register the Bing Search tool with the agent."""
         try:
-            # Import the bing search module
-            from bing_search import bing_search as bing_search_func
+            logger.info("Using Bing Search nokey version")
+            from bing_search_nokey import bing_search as bing_search_func
+            
+            logger.debug(f"bing_search_func function details: {bing_search_func.__name__}, {bing_search_func.__module__}")
+            import inspect
+            logger.debug(f"bing_search_func signature: {inspect.signature(bing_search_func)}")
             
             @function_tool
             async def bing_search(context: RunContext, query: str, num_results: int = 5) -> str:
                 """Search the web using Bing specifically."""
-                try:
-                    results = await bing_search_func(context, query, num_results)
-                    return results
-                except Exception as e:
-                    return f"Error searching with Bing: {str(e)}"
+                logger.debug(f"Calling bing_search with: query={query}, num_results={num_results}, context={context}")
+                results = await bing_search_func(context, query, num_results)
+                return results
             
-            # Register the tool with the agent using the proper update_tools method
-            try:
-                # Get current tools
-                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
-                
-                # Add our new tool
-                all_tools = list(current_tools) + [bing_search]
-                
-                # Update the agent's tools
-                await self.agent.update_tools(all_tools)
-                
-                logger.info("Added Bing Search tool to agent")
-                # Notify console
-                await self.update_agent_instructions(f"Tool added: bing_search - Search the web using Bing specifically")
-            except Exception as e:
-                logger.error(f"Error adding Bing Search tool: {e}")
-                logger.warning("Could not add Bing Search tool to agent")
-            
+            # Register the tool
+            await self.update_agent_tools([bing_search])
+            logger.info("Added Bing Search tool to agent")
+            logger.info("Agent status update: Tool added: bing_search - Search the web using Bing specifically")
+            await self.update_agent_instructions("Tool added: bing_search - Search the web using Bing specifically")
+            logger.info("Registered Bing Search tool")
             self.web_search_tools.append(bing_search)
+            self.loaded_tools["bing_search"] = True
+        except Exception as e:
+            logger.error(f"Error registering Bing Search: {str(e)}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Exception traceback: {traceback.format_exc()}")
+            self.loaded_tools["bing_search"] = False
+            # Don't raise the exception, just log it
+            logger.warning(f"Failed to register Bing Search: {str(e)}")
             
             logger.info("Registered Bing Search tool")
         except ImportError:
@@ -328,81 +431,179 @@ class AgentStartupOptimizer:
     async def register_duckduckgo_search(self):
         """Register DuckDuckGo Search tool with the agent."""
         try:
-            # Import the duckduckgo search module
-            from duckduckgo_search import duckduckgo_search as ddg_search_func
-            
-            @function_tool
-            async def duckduckgo_search(context: RunContext, query: str, num_results: int = 5) -> str:
-                """Search the web using DuckDuckGo specifically."""
-                try:
-                    results = await ddg_search_func(context, query, num_results)
-                    return results
-                except Exception as e:
-                    return f"Error searching with DuckDuckGo: {str(e)}"
-            
-            # Register the tool with the agent using the proper update_tools method
+            # First try the official package
             try:
-                # Get current tools
-                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                try:
+                    # Check if the package is installed
+                    import pkg_resources
+                    try:
+                        pkg_resources.get_distribution('duckduckgo-search')
+                        logger.info("duckduckgo-search package is installed")
+                    except pkg_resources.DistributionNotFound:
+                        logger.warning("duckduckgo-search package is not installed")
+                    
+                    # Try importing with detailed error handling
+                    import sys
+                    logger.debug(f"Python path: {sys.path}")
+                    
+                    # Check for circular imports
+                    import os
+                    if os.path.exists(os.path.join(os.path.dirname(__file__), 'duckduckgo_search.py')):
+                        logger.warning("Found local duckduckgo_search.py file - potential circular import issue")
+                    
+                    from duckduckgo_search import DDGS
+                    logger.info("Successfully imported DDGS from duckduckgo_search")
+                    logger.debug(f"DDGS class details: {DDGS.__module__}")
+                except Exception as detailed_error:
+                    logger.error(f"Detailed error importing DDGS: {str(detailed_error)}")
+                    if "circular import" in str(detailed_error).lower():
+                        logger.error("Detected circular import issue with duckduckgo_search")
+                    raise ImportError(f"Failed to import DDGS: {str(detailed_error)}")
                 
-                # Add our new tool
-                all_tools = list(current_tools) + [duckduckgo_search]
+                logger.info("Using official DuckDuckGo Search package")
                 
-                # Update the agent's tools
-                await self.agent.update_tools(all_tools)
+                @function_tool
+                async def duckduckgo_search(context: RunContext, query: str, num_results: int = 5) -> str:
+                    """Search the web using DuckDuckGo specifically."""
+                    try:
+                        logger.debug(f"Creating DDGS instance for query: {query}")
+                        # Create DDGS instance without using it as an async context manager
+                        ddgs = DDGS()
+                        logger.debug("DDGS instance created successfully")
+                        # Use the text method directly (it's not async in the official package)
+                        results = [r for r in ddgs.text(query, max_results=num_results)]
+                        logger.debug(f"Got {len(results)} results from DuckDuckGo")
+                        return str(results)
+                    except Exception as e:
+                        logger.error(f"Error in duckduckgo_search function: {str(e)}")
+                        return f"Error searching with DuckDuckGo: {str(e)}"
+            except ImportError as e:
+                # Fall back to our custom implementation
+                logger.warning(f"Official DuckDuckGo Search package not available: {str(e)}")
+                logger.info("Using custom DuckDuckGo Search nokey implementation")
                 
+                try:
+                    from duckduckgo_search_nokey import duckduckgo_search as duckduckgo_search_func
+                    logger.info("Successfully imported custom duckduckgo_search_nokey implementation")
+                    logger.debug(f"duckduckgo_search_func details: {duckduckgo_search_func.__name__}, {duckduckgo_search_func.__module__}")
+                    
+                    # Test the function to ensure it's properly defined
+                    import inspect
+                    logger.debug(f"duckduckgo_search_func signature: {inspect.signature(duckduckgo_search_func)}")
+                except Exception as custom_error:
+                    logger.error(f"Error importing custom duckduckgo_search_nokey: {str(custom_error)}")
+                    # Check if the file exists
+                    import os
+                    if os.path.exists(os.path.join(os.path.dirname(__file__), 'duckduckgo_search_nokey.py')):
+                        logger.info("duckduckgo_search_nokey.py file exists but has errors")
+                    else:
+                        logger.warning("duckduckgo_search_nokey.py file does not exist")
+                    raise ImportError(f"Failed to import custom duckduckgo_search_nokey: {str(custom_error)}")
+                
+                @function_tool
+                async def duckduckgo_search(context: RunContext, query: str, num_results: int = 5) -> str:
+                    """Search the web using DuckDuckGo specifically."""
+                    try:
+                        logger.debug(f"Calling duckduckgo_search_func with: context={context}, query={query}, num_results={num_results}")
+                        results = await duckduckgo_search_func(context, query, num_results)
+                        return results
+                    except Exception as e:
+                        logger.error(f"Error in duckduckgo_search function (custom): {str(e)}")
+                        return f"Error searching with DuckDuckGo: {str(e)}"
+        except ImportError as e:
+            logger.warning(f"DuckDuckGo Search not available: {str(e)}")
+            logger.warning("Try installing with: pip install duckduckgo-search")
+            return
+
+        # Register the tool with the agent using our duplicate-prevention method
+        try:
+            # Use our new method to update agent tools
+            added_tools = await self.update_agent_tools([duckduckgo_search])
+            
+            if added_tools:
                 logger.info("Added DuckDuckGo Search tool to agent")
                 # Notify console
                 await self.update_agent_instructions(f"Tool added: duckduckgo_search - Search the web using DuckDuckGo specifically")
-            except Exception as e:
-                logger.error(f"Error adding DuckDuckGo Search tool: {e}")
-                logger.warning("Could not add DuckDuckGo Search tool to agent")
-            
-            self.web_search_tools.append(duckduckgo_search)
-            
-            logger.info("Registered DuckDuckGo Search tool")
-        except ImportError:
-            logger.warning("DuckDuckGo Search not available")
-            
+                
+                # Add to our web search tools list
+                self.web_search_tools.append(duckduckgo_search)
+                self.loaded_tools["duckduckgo_search"] = True
+                logger.info("Registered DuckDuckGo Search tool")
+            else:
+                logger.info("DuckDuckGo Search tool already registered")
+        except Exception as e:
+            logger.error(f"Error adding DuckDuckGo Search tool: {e}")
+            logger.warning("Could not add DuckDuckGo Search tool to agent")
+    
     async def register_google_search(self):
         """Register Google Search tool with the agent."""
         try:
-            # Import the google search module
-            from googlesearch.googlesearch import google_search as google_search_func
-            
-            @function_tool
-            async def google_search(context: RunContext, query: str, num_results: int = 5) -> str:
-                """Search the web using Google specifically."""
-                try:
-                    results = await google_search_func(context, query, num_results)
-                    return results
-                except Exception as e:
-                    return f"Error searching with Google: {str(e)}"
-            
-            # Register the tool with the agent using the proper update_tools method
             try:
-                # Get current tools
-                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                from google_search_nokey import google_search as google_search_func
+                logger.info("Using Google Search nokey version")
+                logger.debug(f"google_search_func function details: {google_search_func.__name__}, {google_search_func.__module__}")
                 
-                # Add our new tool
-                all_tools = list(current_tools) + [google_search]
+                # Test the function to ensure it's properly defined
+                import inspect
+                logger.debug(f"google_search_func signature: {inspect.signature(google_search_func)}")
                 
-                # Update the agent's tools
-                await self.agent.update_tools(all_tools)
-                
+                # Check if the required packages are installed
+                import pkg_resources
+                try:
+                    pkg_resources.get_distribution('googlesearch-python')
+                    logger.info("googlesearch-python package is installed")
+                except pkg_resources.DistributionNotFound:
+                    try:
+                        pkg_resources.get_distribution('google-search')
+                        logger.info("google-search package is installed")
+                    except pkg_resources.DistributionNotFound:
+                        logger.warning("Neither googlesearch-python nor google-search packages are installed")
+            except Exception as e:
+                logger.error(f"Error importing google_search_nokey: {str(e)}")
+                # Check if the file exists
+                import os
+                if os.path.exists(os.path.join(os.path.dirname(__file__), 'google_search_nokey.py')):
+                    logger.info("google_search_nokey.py file exists but has errors")
+                else:
+                    logger.warning("google_search_nokey.py file does not exist")
+                raise ImportError(f"Failed to import google_search_nokey: {str(e)}")
+        except ImportError as e:
+            logger.warning(f"Google Search not available: {str(e)}")
+            logger.warning("Try installing with: pip install google-search-nokey")
+            return
+
+        @function_tool
+        async def google_search(context: RunContext, query: str, num_results: int = 5) -> str:
+            """Search the web using Google specifically."""
+            try:
+                logger.debug(f"Calling google_search_func with: context={context}, query={query}, num_results={num_results}")
+                results = await google_search_func(context, query, num_results)
+                return results
+            except Exception as e:
+                logger.error(f"Error in google_search function: {str(e)}")
+                return f"Error searching with Google: {str(e)}"
+
+        # Register the tool with the agent using our duplicate-prevention method
+        try:
+            # Use our new method to update agent tools
+            added_tools = await self.update_agent_tools([google_search])
+            
+            if added_tools:
                 logger.info("Added Google Search tool to agent")
                 # Notify console
                 await self.update_agent_instructions(f"Tool added: google_search - Search the web using Google specifically")
-            except Exception as e:
-                logger.error(f"Error adding Google Search tool: {e}")
-                logger.warning("Could not add Google Search tool to agent")
-            
-            self.web_search_tools.append(google_search)
-            
-            logger.info("Registered Google Search tool")
-        except ImportError:
-            logger.warning("Google Search not available")
-            
+                
+                # Add to our web search tools list
+                self.web_search_tools.append(google_search)
+                self.loaded_tools["google_search"] = True
+                logger.info("Registered Google Search tool")
+            else:
+                logger.info("Google Search tool already registered")
+        except Exception as e:
+            logger.error(f"Error adding Google Search tool: {e}")
+            logger.warning("Could not add Google Search tool to agent")
+        logger.info("Registered Google Search tool")
+
     async def register_wikipedia_search(self):
         """Register Wikipedia Search tool with the agent."""
         try:
@@ -425,27 +626,25 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching Wikipedia: {str(e)}"
             
-            # Register the tool with the agent using the proper update_tools method
+            # Register the tool with the agent using our duplicate-prevention method
             try:
-                # Get current tools
-                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                # Use our new method to update agent tools
+                added_tools = await self.update_agent_tools([wikipedia_search])
                 
-                # Add our new tool
-                all_tools = list(current_tools) + [wikipedia_search]
-                
-                # Update the agent's tools
-                await self.agent.update_tools(all_tools)
-                
-                logger.info("Added Wikipedia Search tool to agent")
-                # Notify console
-                await self.update_agent_instructions(f"Tool added: wikipedia_search - Search Wikipedia for information on a topic")
+                if added_tools:
+                    logger.info("Added Wikipedia Search tool to agent")
+                    # Notify console
+                    await self.update_agent_instructions(f"Tool added: wikipedia_search - Search Wikipedia for information on a topic")
+                    
+                    # Add to our web search tools list
+                    self.web_search_tools.append(wikipedia_search)
+                    self.loaded_tools["wikipedia"] = True
+                    logger.info("Registered Wikipedia Search tool")
+                else:
+                    logger.info("Wikipedia Search tool already registered")
             except Exception as e:
                 logger.error(f"Error adding Wikipedia Search tool: {e}")
                 logger.warning("Could not add Wikipedia Search tool to agent")
-            
-            self.web_search_tools.append(wikipedia_search)
-            
-            logger.info("Registered Wikipedia Search tool")
         except ImportError:
             logger.warning("Wikipedia API not available")
             
@@ -454,63 +653,149 @@ class AgentStartupOptimizer:
         @function_tool
         async def web_search(context: RunContext, query: str, num_results: int = 5) -> str:
             """Search the web using the best available search engine."""
-            # Prioritize search engines based on availability
+            # Prioritize search engines in the specified order: brave API → brave nokey → duckduckgo → google → bing
+            # Only Brave has both API and nokey versions, all others are nokey only
+            
+            # 1. Try Brave Search API version first
             if self.has_brave_search:
                 try:
-                    from brave_search_api import brave_web_search
-                    results = await brave_web_search(query, num_results)
+                    try:
+                        from brave_search_api import brave_web_search
+                        logger.info("web_search using Brave Search API")
+                        logger.debug(f"brave_web_search function details: {brave_web_search.__name__}, {brave_web_search.__module__}")
+                    except ImportError as import_error:
+                        logger.error(f"Error importing brave_web_search in web_search: {str(import_error)}")
+                        raise
+                    
+                    # Check if API key is available
+                    import os
+                    api_key = os.environ.get("BRAVE_WEB_SEARCH_API_KEY")
+                    if not api_key:
+                        logger.warning("BRAVE_WEB_SEARCH_API_KEY environment variable not set in web_search")
+                    
+                    logger.debug(f"Calling brave_web_search with: query={query}, num_results={num_results}, context={context}")
+                    results = await brave_web_search(query, num_results, context)
+                    logger.debug(f"Brave Search API returned results: {len(results) if isinstance(results, str) else 'non-string result'}")
                     return results
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to use Brave Search API: {str(e)}")
+                    logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
             
-            if self.has_bing_search:
+            # 2. Try Brave Search nokey version
+            if self.has_brave_search:
                 try:
-                    from bing_search import bing_search
-                    results = await bing_search(context, query, num_results)
+                    try:
+                        from brave_search_nokey import brave_search as brave_search_nokey
+                        logger.info("web_search using Brave Search nokey")
+                        logger.debug(f"brave_search_nokey function details: {brave_search_nokey.__name__}, {brave_search_nokey.__module__}")
+                    except ImportError as import_error:
+                        logger.error(f"Error importing brave_search_nokey in web_search: {str(import_error)}")
+                        raise
+                    
+                    logger.debug(f"Calling brave_search_nokey with: context={context}, query={query}, num_results={num_results}")
+                    results = await brave_search_nokey(context, query, num_results)
+                    logger.debug(f"Brave Search nokey returned results: {len(results) if isinstance(results, str) else 'non-string result'}")
                     return results
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to use Brave Search nokey: {str(e)}")
+                    logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
             
+            # 3. Try DuckDuckGo nokey version
             if self.has_duckduckgo:
                 try:
-                    from duckduckgo_search import duckduckgo_search
-                    results = await duckduckgo_search(context, query, num_results)
-                    return results
-                except Exception:
-                    pass
+                    # First try the official package
+                    try:
+                        # Check for circular imports
+                        import os
+                        if os.path.exists(os.path.join(os.path.dirname(__file__), 'duckduckgo_search.py')):
+                            logger.warning("Found local duckduckgo_search.py file in web_search - potential circular import issue")
+                        
+                        from duckduckgo_search import DDGS
+                        logger.info("web_search using DuckDuckGo nokey (official package)")
+                        logger.debug(f"DDGS class details in web_search: {DDGS.__module__}")
+                    except ImportError as import_error:
+                        # Try our custom implementation
+                        logger.warning(f"Official DuckDuckGo package not available in web_search: {str(import_error)}")
+                        logger.info("web_search using custom DuckDuckGo implementation")
+                        
+                        from duckduckgo_search_nokey import duckduckgo_search as ddg_search_func
+                        logger.debug(f"ddg_search_func details: {ddg_search_func.__name__}, {ddg_search_func.__module__}")
+                        results = await ddg_search_func(context, query, num_results)
+                        logger.debug(f"Custom DuckDuckGo returned results: {len(results) if isinstance(results, str) else 'non-string result'}")
+                        return results
+                    
+                    # If we get here, we're using the official package
+                    logger.debug(f"Creating DDGS instance for query in web_search: {query}")
+                    # Create DDGS instance without using it as an async context manager
+                    ddgs = DDGS()
+                    logger.debug("DDGS instance created successfully in web_search")
+                    # Use the text method directly (it's not async in the official package)
+                    results = [r for r in ddgs.text(query, max_results=num_results)]
+                    logger.debug(f"Got {len(results)} results from DuckDuckGo in web_search")
+                    return str(results)
+                except Exception as e:
+                    logger.warning(f"Failed to use DuckDuckGo nokey: {str(e)}")
+                    logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
             
+            # 4. Try Google Search nokey version
             if self.has_google_search:
                 try:
-                    from googlesearch.googlesearch import google_search
-                    results = await google_search(context, query, num_results)
+                    try:
+                        from google_search_nokey import google_search as google_search_nokey
+                        logger.info("web_search using Google Search nokey")
+                        logger.debug(f"google_search_nokey function details: {google_search_nokey.__name__}, {google_search_nokey.__module__}")
+                    except ImportError as import_error:
+                        logger.error(f"Error importing google_search_nokey in web_search: {str(import_error)}")
+                        raise
+                    
+                    logger.debug(f"Calling google_search_nokey with: context={context}, query={query}, num_results={num_results}")
+                    results = await google_search_nokey(context, query, num_results)
+                    logger.debug(f"Google Search nokey returned results: {len(results) if isinstance(results, str) else 'non-string result'}")
                     return results
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to use Google Search nokey: {str(e)}")
+                    logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
+                    
+            # 5. Try Bing Search nokey version
+            if self.has_bing_search:
+                try:
+                    try:
+                        from bing_search_nokey import bing_search as bing_search_nokey
+                        logger.info("web_search using Bing Search nokey")
+                        logger.debug(f"bing_search_nokey function details: {bing_search_nokey.__name__}, {bing_search_nokey.__module__}")
+                    except ImportError as import_error:
+                        logger.error(f"Error importing bing_search_nokey in web_search: {str(import_error)}")
+                        raise
+                    
+                    logger.debug(f"Calling bing_search_nokey with: context={context}, query={query}, num_results={num_results}")
+                    results = await bing_search_nokey(context, query, num_results)
+                    logger.debug(f"Bing Search nokey returned results: {len(results) if isinstance(results, str) else 'non-string result'}")
+                    return results
+                except Exception as e:
+                    logger.warning(f"Failed to use Bing Search nokey: {str(e)}")
+                    logger.debug(f"Exception type: {type(e).__name__}, details: {str(e)}")
             
             # Fallback to a simple message if no search engines are available
             return "No search engines are currently available. Please try again later."
         
-        # Register the tool with the agent using the proper update_tools method
+        # Register the tool with the agent using our duplicate-prevention method
         try:
-            # Get current tools
-            current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+            # Use our new method to update agent tools
+            added_tools = await self.update_agent_tools([web_search])
             
-            # Add our new tool
-            all_tools = list(current_tools) + [web_search]
-            
-            # Update the agent's tools
-            await self.agent.update_tools(all_tools)
-            
-            logger.info("Added Web Search tool to agent")
-            # Notify console
-            await self.update_agent_instructions(f"Tool added: web_search - Search the web using the best available search engine")
+            if added_tools:
+                logger.info("Added Web Search tool to agent")
+                # Notify console
+                await self.update_agent_instructions(f"Tool added: web_search - Search the web using the best available search engine")
+                
+                # Add to our web search tools list
+                self.web_search_tools.append(web_search)
+                logger.info("Registered combined web_search tool")
+            else:
+                logger.info("Web Search tool already registered")
         except Exception as e:
             logger.error(f"Error adding Web Search tool: {e}")
             logger.warning("Could not add Web Search tool to agent")
-        
-        self.web_search_tools.append(web_search)
-        
-        logger.info("Registered combined web_search tool")
     
     async def load_job_search_tools(self):
         """Load job search tools if enabled."""
@@ -559,66 +844,52 @@ class AgentStartupOptimizer:
                 except Exception as e:
                     return f"Error searching Indeed: {str(e)}"
             
-            # Register the tool with the agent using the proper update_tools method
+            # Register the tool with the agent using our duplicate-prevention method
             try:
-                # Get current tools
-                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+                # Use our new method to update agent tools
+                added_tools = await self.update_agent_tools([indeed_job_search])
                 
-                # Add our new tool
-                all_tools = list(current_tools) + [indeed_job_search]
-                
-                # Update the agent's tools
-                await self.agent.update_tools(all_tools)
-                
-                logger.info("Added Indeed Job Search tool to agent")
-                # Notify console
-                await self.update_agent_instructions(f"Tool added: indeed_job_search - Search for jobs on Indeed")
+                if added_tools:
+                    logger.info("Added Indeed Job Search tool to agent")
+                    # Notify console
+                    await self.update_agent_instructions(f"Tool added: indeed_job_search - Search for jobs on Indeed")
+                    
+                    # Add to our job search tools list
+                    self.job_search_tools.append(indeed_job_search)
+                    logger.info("Registered Indeed job search tool")
+                else:
+                    logger.info("Indeed Job Search tool already registered")
             except Exception as e:
                 logger.error(f"Error adding Indeed Job Search tool: {e}")
                 logger.warning("Could not add Indeed Job Search tool to agent")
-            
-            self.job_search_tools.append(indeed_job_search)
-            
-            logger.info("Registered Indeed job search tool")
         except ImportError:
             logger.warning("Indeed job search not available")
             
     async def register_locanto_search(self):
         """Register Locanto search tool with the agent."""
         try:
-            # Import the locanto module
-            from brave_search_locanto_optimized import search_locanto as locanto_search_func
-            
-            @function_tool
-            async def search_locanto(context: RunContext, category_path='personals/men-seeking-men', location='western-cape', max_pages=3, return_url=False) -> str:
-                """Search Locanto for listings in a specific category and location."""
-                try:
-                    results = await locanto_search_func(context, category_path, location, max_pages, return_url)
-                    return results
-                except Exception as e:
-                    return f"Error searching Locanto: {str(e)}"
-            
-            # Register the tool with the agent using the proper update_tools method
+            # Try to import the fixed locanto search function first
             try:
-                # Get current tools
-                current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
-                
-                # Add our new tool
-                all_tools = list(current_tools) + [search_locanto]
-                
-                # Update the agent's tools
-                await self.agent.update_tools(all_tools)
-                
-                logger.info("Added Locanto Search tool to agent")
+                from locanto_fixed import search_locanto_fixed as search_locanto
+                logger.info("Added Fixed Locanto Search tool to agent")
+            except ImportError:
+                # Fall back to the original implementation if the fixed version is not available
+                from locanto import search_locanto
+                logger.info("Added Locanto Search tool to agent (original version)")
+            
+            # Register the tool with the agent using our duplicate-prevention method
+            added_tools = await self.update_agent_tools([search_locanto])
+            
+            if added_tools:
                 # Notify console
                 await self.update_agent_instructions(f"Tool added: search_locanto - Search for listings on Locanto")
-            except Exception as e:
-                logger.error(f"Error adding Locanto Search tool: {e}")
-                logger.warning("Could not add Locanto Search tool to agent")
-            
-            self.job_search_tools.append(search_locanto)
-            
-            logger.info("Registered Locanto search tool")
+                self.loaded_tools["search_locanto"] = True
+                logger.info("Registered Locanto search tool")
+            else:
+                logger.info("Locanto Search tool already registered")
+        except Exception as e:
+            logger.error(f"Error adding Locanto Search tool: {e}")
+            logger.warning("Could not add Locanto Search tool to agent")
         except ImportError:
             logger.warning("Locanto search not available")
             
@@ -849,6 +1120,63 @@ class AgentStartupOptimizer:
         await self.agent.update_instructions(instructions)
         logger.info(f"Updated agent instructions: {status_message if status_message else 'General update'}")
         
+    
+    def is_tool_registered(self, tool) -> bool:
+        """Check if a tool is already registered to prevent duplicates.
+        
+        Args:
+            tool: The function tool to check
+            
+        Returns:
+            bool: True if the tool is already registered, False otherwise
+        """
+        tool_name = tool.__name__
+        return tool_name in self.registered_tool_names
+        
+    def register_tool_name(self, tool) -> bool:
+        """Register a tool name to track it and prevent duplicates.
+        
+        Args:
+            tool: The function tool to register
+            
+        Returns:
+            bool: True if the tool was newly registered, False if it was already registered
+        """
+        tool_name = tool.__name__
+        if tool_name in self.registered_tool_names:
+            return False
+            
+        self.registered_tool_names.add(tool_name)
+        return True
+        
+    async def update_agent_tools(self, new_tools):
+        """Update the agent's tools while preventing duplicate registrations.
+        
+        Args:
+            new_tools: List of new tools to add to the agent
+            
+        Returns:
+            List of tools that were actually added (not duplicates)
+        """
+        if not new_tools:
+            return []
+            
+        # Get current tools
+        current_tools = self.agent.tools if hasattr(self.agent, 'tools') else []
+        
+        # Filter out tools that are already registered
+        tools_to_add = []
+        for tool in new_tools:
+            if self.register_tool_name(tool):
+                tools_to_add.append(tool)
+                
+        if tools_to_add:
+            # Update the agent's tools
+            all_tools = list(current_tools) + tools_to_add
+            await self.agent.update_tools(all_tools)
+            
+        return tools_to_add
+        
     async def finalize_agent_configuration(self):
         """Finalize the agent configuration after all tools are loaded."""
         logger.info("Finalizing agent configuration")
@@ -863,15 +1191,15 @@ class AgentStartupOptimizer:
         if self.has_background_embedding and self.background_embedding_started:
             logger.info("Background embedding process is running")
         
-        # Log any tools that failed to load
+        # Check which tools failed to load
         failed_tools = []
-        if self.has_brave_search and "Brave Search" not in str(self.web_search_tools):
+        if self.has_brave_search and not self.loaded_tools["brave_search"]:
             failed_tools.append("Brave Search")
-        if self.has_bing_search and "Bing Search" not in str(self.web_search_tools):
+        if self.has_bing_search and not self.loaded_tools["bing_search"]:
             failed_tools.append("Bing Search")
-        if self.has_duckduckgo and "DuckDuckGo Search" not in str(self.web_search_tools):
+        if self.has_duckduckgo and not self.loaded_tools["duckduckgo_search"]:
             failed_tools.append("DuckDuckGo Search")
-        if self.has_google_search and "Google Search" not in str(self.web_search_tools):
+        if self.has_google_search and not self.loaded_tools["google_search"]:
             failed_tools.append("Google Search")
         if self.has_indeed and len([t for t in self.job_search_tools if "indeed" in str(t).lower()]) == 0:
             failed_tools.append("Indeed Job Search")

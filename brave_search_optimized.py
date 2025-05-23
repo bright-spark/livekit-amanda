@@ -145,9 +145,9 @@ class OptimizedBraveSearchClient:
             max_requests: Maximum number of requests allowed in the time window
             time_window: Time window in seconds for rate limiting
         """
-        self.api_key = api_key or os.environ.get("BRAVE_API_KEY")
+        self.api_key = api_key or os.environ.get("BRAVE_WEB_SEARCH_API_KEY")
         if not self.api_key:
-            logging.warning("No Brave API key provided. Please set BRAVE_API_KEY environment variable or pass it to the constructor.")
+            logging.warning("No Brave API key provided. Please set BRAVE_WEB_SEARCH_API_KEY environment variable or pass it to the constructor.")
         
         self.base_url = "https://api.search.brave.com/res/v1/web/search"
         self.headers = {

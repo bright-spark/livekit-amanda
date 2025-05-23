@@ -42,6 +42,77 @@ _cache_max_size = 1000
 # Session cache for even faster lookups
 _session_cache = {}
 
+
+async def brave_web_search(query: str, num_results: int = 5, context=None) -> str:
+    """Search the web using Brave Search API.
+    
+    Args:
+        query: The search query string
+        num_results: Maximum number of results to return
+        context: Optional run context from the agent (not used but included for compatibility)
+        
+    Returns:
+        A formatted string containing search results
+    """
+    logger.info(f"Performing Brave web search for: {query}")
+    
+    # Check cache first
+    cache_key = f"web_search:{query}:{num_results}"
+    if ENABLE_CACHE and cache_key in _cache:
+        logger.info(f"Cache hit for query: {query}")
+        return _cache[cache_key]
+    
+    # Prepare API request
+    api_key = os.environ.get("BRAVE_WEB_SEARCH_API_KEY")
+    if not api_key:
+        logger.warning("BRAVE_WEB_SEARCH_API_KEY environment variable not set")
+        return "Brave Search API key not found in environment variables."
+    
+    headers = {
+        "Accept": "application/json",
+        "X-Subscription-Token": api_key
+    }
+    
+    params = {
+        "q": query,
+        "count": num_results,
+        "search_lang": "en"
+    }
+    
+    try:
+        # Respect rate limits
+        await asyncio.sleep(1.0 / RATE_LIMIT)
+        
+        # Make the API request
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.search.brave.com/res/v1/web/search", 
+                                   headers=headers, params=params) as response:
+                if response.status != 200:
+                    return f"Error: Brave Search API returned status code {response.status}"
+                
+                data = await response.json()
+                
+                # Format results
+                results = []
+                if "web" in data and "results" in data["web"]:
+                    for item in data["web"]["results"][:num_results]:
+                        title = item.get("title", "No title")
+                        url = item.get("url", "No URL")
+                        description = item.get("description", "No description")
+                        results.append(f"Title: {title}\nURL: {url}\nDescription: {description}\n")
+                
+                formatted_results = "\n".join(results) if results else "No results found."
+                
+                # Cache results
+                if ENABLE_CACHE:
+                    _cache[cache_key] = formatted_results
+                    
+                return formatted_results
+    except Exception as e:
+        logger.error(f"Error in Brave web search: {str(e)}")
+        return f"Error performing search: {str(e)}"
+
+
 class RateLimiter:
     """Rate limiter to prevent exceeding API limits."""
     

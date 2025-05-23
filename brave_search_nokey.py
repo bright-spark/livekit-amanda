@@ -20,6 +20,7 @@ from urllib.parse import quote_plus
 
 import aiohttp
 from bs4 import BeautifulSoup
+from livekit.agents import RunContext
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -54,9 +55,97 @@ class RateLimiter:
         Args:
             requests_per_second: Maximum number of requests per second
         """
-        self.min_interval = 1.0 / requests_per_second
+        self.requests_per_second = requests_per_second
         self.last_request_time = 0
-        self.lock = asyncio.Lock()
+        
+    async def wait(self):
+        """Wait for the appropriate time before making a new request."""
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_request_time
+        time_to_wait = max(0, 1.0 / self.requests_per_second - time_since_last_request)
+        
+        if time_to_wait > 0:
+            await asyncio.sleep(time_to_wait)
+            
+        self.last_request_time = time.time()
+
+
+async def brave_search(context: RunContext, query: str, num_results: int = 5) -> str:
+    """Search the web using Brave Search without requiring an API key.
+    
+    Args:
+        context: The run context from the agent
+        query: The search query string
+        num_results: Maximum number of results to return
+        
+    Returns:
+        A formatted string containing search results
+    """
+    logger.info(f"Performing Brave search (nokey) for: {query}")
+    
+    # Check cache first
+    cache_key = f"brave_nokey:{query}:{num_results}"
+    if ENABLE_CACHE and cache_key in _cache:
+        logger.info(f"Cache hit for query: {query}")
+        return _cache[cache_key]
+    
+    # Create rate limiter
+    rate_limiter = RateLimiter(RATE_LIMIT)
+    
+    try:
+        # Respect rate limits
+        await rate_limiter.wait()
+        
+        # Prepare the search URL
+        search_url = f"https://search.brave.com/search?q={quote_plus(query)}&source=web"
+        
+        # Make the request
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(search_url, headers=headers) as response:
+                if response.status != 200:
+                    return f"Error: Brave Search returned status code {response.status}"
+                
+                html = await response.text()
+                
+                # Parse the HTML
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Extract search results
+                results = []
+                search_results = soup.select('.snippet')
+                
+                for i, result in enumerate(search_results):
+                    if i >= num_results:
+                        break
+                        
+                    title_elem = result.select_one('.snippet-title')
+                    url_elem = result.select_one('.result-header a')
+                    desc_elem = result.select_one('.snippet-description')
+                    
+                    title = title_elem.get_text() if title_elem else "No title"
+                    url = url_elem['href'] if url_elem and 'href' in url_elem.attrs else "No URL"
+                    description = desc_elem.get_text() if desc_elem else "No description"
+                    
+                    results.append(f"Title: {title}\nURL: {url}\nDescription: {description}\n")
+                
+                formatted_results = "\n".join(results) if results else "No results found."
+                
+                # Cache results
+                if ENABLE_CACHE:
+                    _cache[cache_key] = formatted_results
+                
+                return formatted_results
+    except Exception as e:
+        logger.error(f"Error in Brave search (nokey): {str(e)}")
+        return f"Error performing search: {str(e)}"
+    
+    # End of RateLimiter class
     
     async def wait_if_needed(self) -> None:
         """Wait if necessary to comply with rate limits."""

@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional, Union
 
 import httpx
 from bs4 import BeautifulSoup
-import duckduckgo3
+from duckduckgo_search import DDGS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,7 +21,7 @@ class DuckDuckGoSearch:
     
     def __init__(self):
         """Initialize the DuckDuckGo search client."""
-        self.client = duckduckgo3.Client()
+        self.client = DDGS()
         self.cache = {}
         self.last_request_time = 0
         self.rate_limit = 1  # 1 request per second
