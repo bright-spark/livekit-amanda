@@ -1209,13 +1209,14 @@ class DataManager:
                 self.start_file_monitoring()
     
     def initialize_embedding_client(self):
-        """Initialize the Azure OpenAI embedding client."""
-        if AZURE_OPENAI_EMBEDDING_API_KEY and AZURE_OPENAI_EMBEDDING_ENDPOINT:
+        """Initialize the embedding client based on available credentials."""
+        # Use the standard Azure OpenAI environment variables
+        if os.environ.get("AZURE_OPENAI_API_KEY") and os.environ.get("AZURE_OPENAI_ENDPOINT"):
             try:
                 self.embedding_client = openai.AzureOpenAI(
-                    api_key=AZURE_OPENAI_EMBEDDING_API_KEY,
-                    api_version=AZURE_OPENAI_EMBEDDING_API_VERSION,
-                    azure_endpoint=AZURE_OPENAI_EMBEDDING_ENDPOINT
+                    api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
+                    api_version=os.environ.get("AZURE_OPENAI_VERSION"),
+                    azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT")
                 )
                 logger.info("Azure OpenAI embedding client initialized successfully")
             except Exception as e:
@@ -1676,7 +1677,7 @@ class DataManager:
         try:
             response = self.embedding_client.embeddings.create(
                 input=text,
-                model=AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+                model=os.environ.get("AZURE_OPENAI_DEPLOYMENT", "model-router")
             )
             return np.array(response.data[0].embedding)
         except Exception as e:
