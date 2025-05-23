@@ -3,3 +3,7 @@ venv/
 .venv/
 __pycache__/
 .DS_Store
+chroma/
+chroma.sqlite3
+enhanced_search_rag_cache/*
+kiki.txt
