@@ -1,8 +1,8 @@
 # Brave Search Quality API Integration with LangChain and RAG
 
-## Overview
+*Last Updated: May 23, 2025 - Alpha Release*
 
-This document provides comprehensive documentation on the integration of the Brave Search Quality API with LangChain components and Retrieval-Augmented Generation (RAG) in the LiveKit Amanda project. This integration enhances search capabilities by combining high-quality web search results with local data through vector embeddings and retrieval.
+This document provides comprehensive information about the integration of Brave Search Quality API with LangChain components and Retrieval-Augmented Generation (RAG) in the LiveKit Amanda project. This integration has been thoroughly tested and is ready for alpha release. This integration enhances search capabilities by combining high-quality web search results with local data through vector embeddings and retrieval.
 
 ## Architecture
 
@@ -301,7 +301,7 @@ class DataDirectoryWatcher:
 
 ## Configuration
 
-The integration can be configured through environment variables:
+The integration can be configured through environment variables. The following environment variables have been updated for the alpha release:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -381,20 +381,25 @@ async def main():
 
 ### Common Issues
 
-1. **Missing Dependencies**:
-   - Ensure all required packages are installed: `langchain`, `langchain-community`, `langchain-openai`, `chromadb`, `watchdog`
+1. **API Key Issues**: Ensure that the Brave Search API key is correctly set in the environment variables
+2. **Cache Issues**: If the cache is not working correctly, try clearing it or adjusting the TTL settings
+3. **RAG Issues**: If the RAG integration is not working correctly, check the vector store configuration
+4. **Session Management**: If you encounter warnings about unclosed sessions, ensure you're using the latest version with enhanced session cleanup
+5. **Environment Variables**: Verify that all environment variables are correctly set, particularly the Azure OpenAI variables which have been updated in this release
 
-2. **Configuration Issues**:
-   - Check that all required environment variables are set correctly
-   - Verify Azure OpenAI credentials are valid
+### Fixed Issues in Alpha Release
 
-3. **File Processing Errors**:
-   - Ensure the data directory exists and has appropriate permissions
-   - Check file formats are supported by the loaders
+1. **Environment Variable Naming**: Updated environment variable names for Azure OpenAI integration:
+   - Changed from `AZURE_OPENAI_EMBEDDING_API_KEY` to `AZURE_OPENAI_API_KEY`
+   - Changed from `AZURE_OPENAI_EMBEDDING_ENDPOINT` to `AZURE_OPENAI_ENDPOINT`
+   - Changed from `AZURE_OPENAI_API_VERSION` to `AZURE_OPENAI_VERSION`
+   - Changed from `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` to `AZURE_OPENAI_DEPLOYMENT`
 
-4. **Vector Store Issues**:
-   - Verify the vector store directories exist and are writable
-   - Check embedding model configuration
+2. **Session Management**: Enhanced session cleanup to properly close all aiohttp sessions, preventing resource leaks
+
+3. **Persistent Cache**: Improved persistent cache testing and functionality, ensuring proper storage and retrieval of search results
+
+4. **Async Handling**: Fixed issues with async method calls to ensure proper awaiting of coroutines
 
 ### Logging
 
