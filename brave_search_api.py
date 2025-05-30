@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 # Get configuration from environment variables
 ENABLE_CACHE = os.environ.get("BRAVE_SEARCH_ENABLE_CACHE", "true").lower() == "true"
 ENABLE_PERSISTENCE = os.environ.get("BRAVE_SEARCH_ENABLE_PERSISTENCE", "true").lower() == "true"
-RATE_LIMIT = int(os.environ.get("BRAVE_SEARCH_RATE_LIMIT", "1"))
+# Rate limit: 1 for free tier, 20 for paid tier
+RATE_LIMIT = int(os.environ.get("BRAVE_SEARCH_RATE_LIMIT", "1").split('#')[0].strip())
 
 # Simple in-memory cache
 _cache = {}

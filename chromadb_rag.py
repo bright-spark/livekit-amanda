@@ -35,10 +35,16 @@ logger = logging.getLogger(__name__)
 # Configuration from environment variables
 DATA_DIR = os.environ.get("ENHANCED_SEARCH_RAG_CACHE_DIR", os.path.expanduser("~/.enhanced_search_rag_cache"))
 ENABLE_RAG = os.environ.get("ENHANCED_SEARCH_ENABLE_RAG", "true").lower() in ("true", "1", "yes")
-RAG_MAX_ENTRIES = int(os.environ.get("ENHANCED_SEARCH_RAG_MAX_ENTRIES", "1000"))
-RAG_MIN_SIMILARITY = float(os.environ.get("ENHANCED_SEARCH_RAG_MIN_SIMILARITY", "0.75"))
+# Maximum number of entries in the RAG cache
+RAG_MAX_ENTRIES = int(os.environ.get("ENHANCED_SEARCH_RAG_MAX_ENTRIES", "1000").split('#')[0].strip())
+# Minimum similarity threshold for RAG results
+RAG_MIN_SIMILARITY = float(os.environ.get("ENHANCED_SEARCH_RAG_MIN_SIMILARITY", "0.75").split('#')[0].strip())
 
-# Azure OpenAI configuration - using model router
+# Embedding model configuration
+# Using a small, modern embedding model from Hugging Face
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5" # Small, modern, efficient model with good performance
+
+# Azure OpenAI configuration - using model router (as fallback)
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "model-router")
@@ -172,9 +178,65 @@ def _init_chroma_client():
         _client = None
         _collection = None
 
+# Global model cache
+_huggingface_model = None
+
+def _get_huggingface_model():
+    """Get the HuggingFace model, loading it from cache if available."""
+    global _huggingface_model
+    
+    if _huggingface_model is not None:
+        return _huggingface_model
+    
+    try:
+        from sentence_transformers import SentenceTransformer
+        logger.info(f"Loading embedding model from cache: {EMBEDDING_MODEL_NAME}")
+        _huggingface_model = SentenceTransformer(
+            EMBEDDING_MODEL_NAME, 
+            cache_folder=os.path.join(DATA_DIR, "models")
+        )
+        logger.info(f"Successfully loaded embedding model: {EMBEDDING_MODEL_NAME}")
+        return _huggingface_model
+    except Exception as e:
+        logger.error(f"Error loading embedding model: {e}")
+        return None
+
 def _get_embedding_function():
-    """Get the embedding function for ChromaDB using Azure model router."""
-    # Try to use Azure OpenAI with model router
+    """Get the embedding function for ChromaDB using a modern Hugging Face model."""
+    # Try to use the modern Hugging Face model with caching
+    try:
+        # Check if we can get the model
+        model = _get_huggingface_model()
+        if model is not None:
+            # Create a custom embedding function that uses our cached model
+            class CachedHuggingFaceEmbeddingFunction:
+                def __init__(self, model):
+                    self.model = model
+                
+                def __call__(self, input):
+                    if not input:
+                        return []
+                    
+                    # Convert to list if single string
+                    if isinstance(input, str):
+                        input = [input]
+                    
+                    # Generate embeddings
+                    return self.model.encode(input)
+            
+            logger.info("Using cached HuggingFace model for embeddings")
+            return CachedHuggingFaceEmbeddingFunction(model)
+        
+        # If we couldn't get the model, try the standard HuggingFace embedding function
+        logger.info("Using standard HuggingFace embedding function")
+        return embedding_functions.HuggingFaceEmbeddingFunction(
+            model_name=EMBEDDING_MODEL_NAME,
+            cache_dir=os.path.join(DATA_DIR, "models")
+        )
+    except Exception as e:
+        logger.warning(f"Error creating Hugging Face embedding function: {e}")
+    
+    # Fall back to Azure OpenAI with model router if available
     if AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT:
         try:
             return AzureOpenAIEmbeddingFunction(
@@ -187,7 +249,6 @@ def _get_embedding_function():
             logger.warning(f"Error creating Azure OpenAI embedding function: {e}")
     
     # Fall back to default embedding function from ChromaDB
-    # This uses the default embedding model from sentence-transformers
     try:
         # Use the built-in default embedding function which has the correct interface
         return embedding_functions.DefaultEmbeddingFunction()
@@ -201,7 +262,7 @@ def _get_embedding_function():
                 import random
                 if isinstance(input, str):
                     input = [input]
-                return [[random.uniform(-1, 1) for _ in range(768)] for _ in range(len(input))]
+                return [[random.uniform(-1, 1) for _ in range(384)] for _ in range(len(input))]
         
         return FallbackEmbeddingFunction()
 

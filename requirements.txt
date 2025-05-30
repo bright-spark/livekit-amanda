@@ -31,6 +31,7 @@ python-dotenv
 setuptools
 pytz
 geopy
+PyPDF2
 
 # Search and information retrieval
 wikipedia-api
@@ -38,8 +39,12 @@ duckduckgo-search
 google-search
 
 # Enhanced search with RAG
-numpy>=1.24.0
+# Downgraded numpy to 1.x to avoid compatibility issues with modules compiled for NumPy 1.x
+numpy>=1.24.0,<2.0.0
 scipy>=1.10.0
 chromadb>=0.4.18
 pydantic>=2.0.0
+
+# Ensure we have a compatible transformers version that includes is_torch_npu_available
+transformers>=4.34.0
 sentence-transformers>=2.2.2

@@ -1024,6 +1024,16 @@ class AgentStartupOptimizer:
         else:
             # Finalize the agent configuration
             await self.finalize_agent_configuration()
+                    self.loaded_tools["background_embedding"] = True
+            else:
+                logger.warning("No enhanced search tools were added")
+                
+            self.enhanced_search_loaded = True
+            self.tool_sources.append("Enhanced Search")
+            
+        except Exception as e:
+            logger.error(f"Error loading enhanced search: {e}")
+            logger.warning("Enhanced search could not be loaded")
 
         # Update instructions to reflect enhanced search
         if self.has_enhanced_search:

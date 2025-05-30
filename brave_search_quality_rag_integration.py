@@ -29,7 +29,7 @@ from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileModifi
 # LangChain imports
 from langchain.memory import ConversationBufferMemory
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.embeddings import OpenAIEmbeddings, HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.tools import BaseTool, Tool
@@ -40,7 +40,7 @@ from langchain.retrievers.document_compressors import EmbeddingsFilter
 # Brave Search Quality API imports
 from brave_search_quality_api import get_quality_api, high_quality_web_search
 from brave_search_persistent_cache import get_persistent_cache
-from enhanced_search import data_manager, add_to_rag_cache, _get_embedding
+from enhanced_search import data_manager, add_to_rag_cache
 
 # Import RAG and vector store components
 from enhanced_search import (
@@ -48,11 +48,13 @@ from enhanced_search import (
     retrieve_from_rag_cache,
     invalidate_rag_entry,
     invalidate_rag_entries_by_query,
-    _get_embedding,
     _cosine_similarity,
     DataManager,
     data_manager
 )
+
+# Import sentence-transformers for local embeddings
+from sentence_transformers import SentenceTransformer
 
 # Import environment variables
 from dotenv import load_dotenv
@@ -70,9 +72,77 @@ ENABLE_RAG = os.environ.get("ENHANCED_SEARCH_ENABLE_RAG", "true").lower() in ("t
 ENABLE_BACKGROUND_EMBEDDING = os.environ.get("ENABLE_BACKGROUND_EMBEDDING", "true").lower() in ("true", "1", "yes")
 ENABLE_REALTIME_EMBEDDING = os.environ.get("ENABLE_REALTIME_MONITORING", "true").lower() in ("true", "1", "yes")
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
-MAX_EMBEDDING_WORKERS = int(os.environ.get("MAX_EMBEDDING_WORKERS", "4"))
-EMBEDDING_CHUNK_SIZE = int(os.environ.get("EMBEDDING_CHUNK_SIZE", "10"))
-MIN_SIMILARITY_THRESHOLD = float(os.environ.get("ENHANCED_SEARCH_RAG_MIN_SIMILARITY", "0.75"))
+# Maximum number of workers for embedding operations
+MAX_EMBEDDING_WORKERS = int(os.environ.get("MAX_EMBEDDING_WORKERS", "4").split('#')[0].strip())
+# Size of embedding chunks for processing
+EMBEDDING_CHUNK_SIZE = int(os.environ.get("EMBEDDING_CHUNK_SIZE", "10").split('#')[0].strip())
+# Minimum similarity threshold for RAG results
+MIN_SIMILARITY_THRESHOLD = float(os.environ.get("ENHANCED_SEARCH_RAG_MIN_SIMILARITY", "0.75").split('#')[0].strip())
+
+# Embedding model configuration
+# Using a small, modern embedding model from Hugging Face
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5" # Small, modern, efficient model with good performance
+
+# Model cache directory
+MODEL_CACHE_DIR = os.path.join(DATA_DIR, "models")
+os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
+
+# Global embedding model instance
+_embedding_model = None
+
+# Function to get or create the embedding model
+def get_embedding_model():
+    """Get the embedding model, loading it from cache if available."""
+    global _embedding_model
+    
+    if _embedding_model is not None:
+        return _embedding_model
+        
+    try:
+        logger.info(f"Loading embedding model from cache: {EMBEDDING_MODEL_NAME}")
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, cache_folder=MODEL_CACHE_DIR)
+        logger.info(f"Successfully loaded embedding model: {EMBEDDING_MODEL_NAME}")
+        return _embedding_model
+    except Exception as e:
+        logger.error(f"Error loading embedding model: {e}")
+        return None
+
+async def _get_embedding(text: str) -> List[float]:
+    """Get embedding for a text using the cached local embedding model.
+    
+    Args:
+        text: The text to embed
+        
+    Returns:
+        Text embedding as a list of floats
+    """
+    try:
+        # Truncate text if too long (bge-small-en-v1.5 has a context length of 512 tokens)
+        # We'll use a conservative character limit
+        if len(text) > 2000:
+            text = text[:2000]
+        
+        # Get the embedding model (loads from cache if available)
+        model = get_embedding_model()
+        if model is None:
+            # Return a random vector as fallback if model couldn't be loaded
+            import random
+            return [random.uniform(-1, 1) for _ in range(384)]  # bge-small-en-v1.5 has 384 dimensions
+        
+        # Generate embedding
+        # We use asyncio.to_thread to run the CPU-intensive embedding generation in a separate thread
+        # This prevents blocking the event loop
+        import asyncio
+        embedding = await asyncio.to_thread(model.encode, text)
+        
+        # Convert numpy array to list
+        return embedding.tolist()
+    
+    except Exception as e:
+        logger.error(f"Error getting embedding: {e}")
+        # Return a zero vector as fallback
+        return [0.0] * 384  # bge-small-en-v1.5 has 384 dimensions
 
 # Queue for background embedding tasks
 embedding_queue = Queue()
@@ -238,8 +308,8 @@ class BraveSearchQualityRAGIntegration:
         self.memory_cache = ConversationBufferMemory(memory_key="search_history", return_messages=True)
         self.memory_cache_ttl = 3600  # 1 hour in seconds
         
-        # 2. Embedding model for vector operations
-        self.embeddings = OpenAIEmbeddings()
+        # 2. Embedding model for vector operations - using local all-MiniLM-L6-v2 model
+        self.embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
         
         # 3. Vector store for quality enriched data and RAG data
         # Create separate collections for quality data and RAG data

@@ -24,8 +24,8 @@ import json
 import hashlib
 from typing import Dict, Any, Optional, List, Union, Tuple
 
-# Import Azure OpenAI and other required libraries
-import openai
+# Import required libraries
+import chromadb
 import numpy as np
 from dotenv import load_dotenv
 
@@ -104,25 +104,68 @@ GOOGLE_SEARCH_ENABLED = os.environ.get("GOOGLE_SEARCH_ENABLE", "true").lower() i
 ENABLE_QUERY_REFORMULATION = os.environ.get("ENHANCED_SEARCH_QUERY_REFORMULATION", "true").lower() in ("true", "1", "yes")
 ENABLE_RESULT_SUMMARIZATION = os.environ.get("ENHANCED_SEARCH_RESULT_SUMMARIZATION", "true").lower() in ("true", "1", "yes")
 ENABLE_MULTI_SOURCE_SEARCH = os.environ.get("ENHANCED_SEARCH_MULTI_SOURCE", "true").lower() in ("true", "1", "yes")
-MAX_SOURCES = int(os.environ.get("ENHANCED_SEARCH_MAX_SOURCES", "2"))
+# Maximum number of sources to use for enhanced search
+MAX_SOURCES = int(os.environ.get("ENHANCED_SEARCH_MAX_SOURCES", "2").split('#')[0].strip())
 
-# Azure OpenAI configuration - using model router
-AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "model-router")
-AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_VERSION")
+# ChromaDB configuration
+CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", os.path.join(os.path.expanduser("~"), ".chroma"))
+os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
 
-# Configure Azure OpenAI client
-from openai import AzureOpenAI
+# Initialize ChromaDB client
+chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
 
-# Create Azure OpenAI client for all operations (chat completions and embeddings)
-azure_client = AzureOpenAI(
-    api_key=AZURE_OPENAI_API_KEY,
-    api_version=AZURE_OPENAI_API_VERSION,
-    azure_endpoint=AZURE_OPENAI_ENDPOINT
-)
+# Create or get the collection for our embeddings
+try:
+    collection = chroma_client.get_or_create_collection(
+        name="enhanced_search",
+        metadata={"hnsw:space": "cosine"}  # Use cosine similarity
+    )
+except Exception as e:
+    logger.error(f"Error initializing ChromaDB collection: {e}")
+    collection = None
+else:
+    logger.info("Configured ChromaDB client")
 
-logger.info(f"Configured Azure OpenAI client with model router: {AZURE_OPENAI_DEPLOYMENT}, version: {AZURE_OPENAI_API_VERSION}")
+# ChromaDB uses its own embedding model by default
+# We'll use its default settings for consistency
+logger.info("Using ChromaDB's default embedding model")
+
+# Function to get embeddings (now just a wrapper around ChromaDB)
+async def get_embeddings(texts: List[str]) -> List[List[float]]:
+    """Get embeddings for multiple texts using ChromaDB.
+    
+    Args:
+        texts: List of texts to embed
+        
+    Returns:
+        List of embeddings as lists of floats
+    """
+    if not texts:
+        return []
+        
+    try:
+        if collection is None:
+            raise RuntimeError("ChromaDB collection not initialized")
+            
+        # Use ChromaDB's built-in embedding function
+        result = collection.add(
+            documents=texts,
+            ids=[hashlib.sha256(text.encode()).hexdigest() for text in texts],
+            metadatas=[{"source": "temp"} for _ in texts],  # Temporary entries
+        )
+        
+        # Get the embeddings
+        embeddings = result["embeddings"]
+        
+        # Remove the temporary entries
+        collection.delete(ids=result["ids"])
+        
+        return embeddings
+        
+    except Exception as e:
+        logger.error(f"Error getting embeddings: {e}")
+        # Return random vectors as fallback
+        return [list(np.random.randn(384)) for _ in texts]  # Same dimensionality as default ChromaDB model
 
 # Simple in-memory cache
 _cache = {}
@@ -134,8 +177,10 @@ ENABLE_RAG = os.environ.get("ENHANCED_SEARCH_ENABLE_RAG", "true").lower() in ("t
 RAG_CACHE_DIR = os.path.expanduser(os.environ.get("ENHANCED_SEARCH_RAG_CACHE_DIR", "~/.enhanced_search_rag_cache"))
 os.makedirs(RAG_CACHE_DIR, exist_ok=True)
 RAG_VECTOR_DB_PATH = os.path.join(RAG_CACHE_DIR, "vector_db.json")
-RAG_MAX_ENTRIES = int(os.environ.get("ENHANCED_SEARCH_RAG_MAX_ENTRIES", "1000"))
-RAG_MIN_SIMILARITY = float(os.environ.get("ENHANCED_SEARCH_RAG_MIN_SIMILARITY", "0.75"))
+# Maximum number of entries in the RAG cache
+RAG_MAX_ENTRIES = int(os.environ.get("ENHANCED_SEARCH_RAG_MAX_ENTRIES", "1000").split('#')[0].strip())
+# Minimum similarity threshold for RAG results
+RAG_MIN_SIMILARITY = float(os.environ.get("ENHANCED_SEARCH_RAG_MIN_SIMILARITY", "0.75").split('#')[0].strip())
 
 # Vector database for RAG
 _vector_db = []
@@ -145,8 +190,10 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 ENABLE_LOCAL_DATA = os.environ.get("ENABLE_LOCAL_DATA", "true").lower() in ("true", "1", "yes")
 ENABLE_REALTIME_MONITORING = os.environ.get("ENABLE_REALTIME_MONITORING", "true").lower() in ("true", "1", "yes")
 ENABLE_BACKGROUND_EMBEDDING = os.environ.get("ENABLE_BACKGROUND_EMBEDDING", "true").lower() in ("true", "1", "yes")
-MAX_EMBEDDING_WORKERS = int(os.environ.get("MAX_EMBEDDING_WORKERS", "4"))
-EMBEDDING_PROGRESS_INTERVAL = float(os.environ.get("EMBEDDING_PROGRESS_INTERVAL", "5.0"))  # Progress reporting interval in percentage
+# Maximum number of workers for embedding operations
+MAX_EMBEDDING_WORKERS = int(os.environ.get("MAX_EMBEDDING_WORKERS", "4").split('#')[0].strip())
+# Progress reporting interval in percentage
+EMBEDDING_PROGRESS_INTERVAL = float(os.environ.get("EMBEDDING_PROGRESS_INTERVAL", "5.0").split('#')[0].strip())
 VECTOR_CACHE_PATH = os.path.join(DATA_DIR, "vector_cache.pkl")
 EMBEDDING_STATE_PATH = os.path.join(DATA_DIR, "embedding_state.pkl")
 
@@ -231,21 +278,15 @@ async def _save_to_cache(cache_key: str, result: Dict[str, Any], ttl: int = _cac
     # Clean cache periodically
     _clean_cache()
 
-# Import ChromaDB RAG implementation
-try:
-    from chromadb_rag import (
-        add_to_rag_cache,
-        invalidate_rag_entry,
-        invalidate_rag_entries_by_query,
-        retrieve_from_rag_cache
-    )
-    HAS_CHROMADB_RAG = True
+# ChromaDB RAG implementation
+HAS_CHROMADB_RAG = collection is not None
+
+if HAS_CHROMADB_RAG:
     logger.info("Using ChromaDB for RAG implementation")
-except ImportError:
-    HAS_CHROMADB_RAG = False
-    logger.warning("ChromaDB RAG implementation not available, falling back to basic implementation")
-    
-    # Basic RAG functions for fallback
+else:
+    logger.warning("ChromaDB collection not initialized, RAG features will be disabled")
+
+# RAG functions using ChromaDB directly
     def _load_vector_db():
         """Load the vector database from disk."""
         global _vector_db
@@ -280,7 +321,7 @@ except ImportError:
             logger.error(f"Error saving vector database: {e}")
 
 async def _get_embedding(text: str) -> List[float]:
-    """Get embedding for a text using Azure OpenAI with model router.
+    """Get embedding for a text using ChromaDB.
     
     Args:
         text: The text to embed
@@ -289,75 +330,31 @@ async def _get_embedding(text: str) -> List[float]:
         Text embedding as a list of floats
     """
     try:
-        # Truncate text if too long
-        if len(text) > 8000:
-            text = text[:8000]
+        if collection is None:
+            raise RuntimeError("ChromaDB collection not initialized")
+            
+        # Use ChromaDB's built-in embedding function
+        result = collection.add(
+            documents=[text],
+            ids=[hashlib.sha256(text.encode()).hexdigest()],
+            metadatas=[{"source": "temp"}],  # Temporary entry for embedding
+        )
         
-        # Use the global Azure client with model router
-        try:
-            response = azure_client.embeddings.create(
-                input=text,
-                model=AZURE_OPENAI_DEPLOYMENT  # Model router will select the appropriate embedding model
-            )
-            
-            embedding = response.data[0].embedding
-            return embedding
-        except Exception as embedding_error:
-            logger.warning(f"Error using embedding model: {embedding_error}. Falling back to chat model for embeddings.")
-            
-            # Fall back to using the chat model for embeddings via extraction
-            system_message = """You are an embedding extraction assistant. Your task is to generate a list of 1536 floating point numbers that represent the semantic meaning of the input text. These numbers should be between -1 and 1 and should capture the key semantic features of the text.
-
-Output ONLY the array of numbers in valid JSON format, nothing else. The output should be exactly 1536 numbers."""
-            
-            response = azure_client.chat.completions.create(
-                model=AZURE_OPENAI_DEPLOYMENT,  # Model router will select the appropriate chat model
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": f"Generate embedding for: {text}"}
-                ],
-                temperature=0.0,  # Use deterministic output
-                max_tokens=3000,
-                response_format={"type": "json_object"}
-            )
-            
-            try:
-                # Try to parse the response as JSON
-                import json
-                content = response.choices[0].message.content.strip()
-                result = json.loads(content)
-                
-                # Extract the embedding from the JSON response
-                if isinstance(result, dict) and "embedding" in result:
-                    embedding = result["embedding"]
-                elif isinstance(result, dict) and "values" in result:
-                    embedding = result["values"]
-                elif isinstance(result, list):
-                    embedding = result
-                else:
-                    # If we can't find a proper embedding, create a random one
-                    logger.warning("Could not extract embedding from model response, using random embedding")
-                    import random
-                    embedding = [random.uniform(-1, 1) for _ in range(1536)]
-                
-                # Ensure we have exactly 1536 dimensions
-                if len(embedding) < 1536:
-                    # Pad with zeros if too short
-                    embedding.extend([0.0] * (1536 - len(embedding)))
-                elif len(embedding) > 1536:
-                    # Truncate if too long
-                    embedding = embedding[:1536]
-                
-                return embedding
-            except Exception as json_error:
-                logger.error(f"Error parsing embedding from chat model: {json_error}")
-                # Return a random vector as fallback
-                import random
-                return [random.uniform(-1, 1) for _ in range(1536)]
+        # Get the embedding
+        embedding = result["embeddings"][0]
+        
+        # Remove the temporary entry
+        collection.delete(ids=[result["ids"][0]])
+        import asyncio
+        embedding = await asyncio.to_thread(model.encode, text)
+        
+        # Convert numpy array to list
+        return embedding.tolist()
+    
     except Exception as e:
         logger.error(f"Error getting embedding: {e}")
         # Return a zero vector as fallback
-        return [0.0] * 1536  # Ada embedding dimension
+        return [0.0] * 384  # bge-small-en-v1.5 has 384 dimensions
 
 def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     """Calculate cosine similarity between two vectors.
@@ -377,204 +374,165 @@ def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
         logger.error(f"Error calculating cosine similarity: {e}")
         return 0.0
 
-# Use the imported add_to_rag_cache if available, otherwise define a fallback
-if not HAS_CHROMADB_RAG:
-    async def add_to_rag_cache(query: str, search_results: str) -> Optional[str]:
-        """Add search results to the RAG cache.
+# Define RAG functions
+async def add_to_rag_cache(query: str, search_results: str) -> Optional[str]:
+    """Add search results to the RAG cache using ChromaDB.
+    
+    Args:
+        query: The search query
+        search_results: The search results
         
-        Args:
-            query: The search query
-            search_results: The search results
-            
-        Returns:
-            ID of the added entry, or None if not added
-        """
-        if not ENABLE_RAG or not AZURE_OPENAI_API_KEY:
-            return
+    Returns:
+        ID of the added entry, or None if not added
+    """
+    if not ENABLE_RAG or not HAS_CHROMADB_RAG:
+        return None
         
-        try:
-            global _vector_db
-            # Load vector DB if not loaded
-            if not _vector_db:
-                _load_vector_db()
-            
-            # Get embeddings
-            query_embedding = await _get_embedding(query)
-            results_embedding = await _get_embedding(search_results)
-            
-            # Create entry with unique ID
-            entry_id = hashlib.md5(f"{query}:{time.time()}".encode()).hexdigest()
-            entry = {
-                "id": entry_id,
+    try:
+        # Generate unique ID for this entry
+        entry_id = hashlib.sha256(f"{query}:{search_results}".encode()).hexdigest()
+        
+        # Add to ChromaDB collection
+        collection.add(
+            ids=[entry_id],
+            documents=[search_results],
+            metadatas=[{
                 "query": query,
-                "results": search_results,
-                "query_embedding": query_embedding,
-                "results_embedding": results_embedding,
-                "timestamp": time.time(),
-                "is_valid": True
-            }
-            
-            # Add to vector DB
-            _vector_db.append(entry)
-            
-            # Limit size
-            if len(_vector_db) > RAG_MAX_ENTRIES:
-                # Sort by timestamp (oldest first) and remove
-                sorted_db = sorted(_vector_db, key=lambda x: x.get("timestamp", 0))
-                _vector_db = sorted_db[-RAG_MAX_ENTRIES:]
-            
-            # Save to disk
-            _save_vector_db()
-            
-            logger.info(f"Added search results for '{query}' to RAG cache with ID: {entry_id}")
-            return entry_id
-        except Exception as e:
-            logger.error(f"Error adding to RAG cache: {e}")
+                "timestamp": str(time.time())
+            }]
+        )
+        
+        logger.info(f"Added entry {entry_id} to RAG cache")
+        return entry_id
+        
+    except Exception as e:
+        logger.error(f"Error adding to RAG cache: {e}")
+        return None
 
-# Use the imported invalidate_rag_entry if available, otherwise define a fallback
-if not HAS_CHROMADB_RAG:
-    async def invalidate_rag_entry(entry_id: str) -> bool:
-        """Invalidate a specific entry in the RAG cache by its ID.
+async def invalidate_rag_entry(entry_id: str) -> bool:
+    """Invalidate a specific entry in the RAG cache by its ID.
+    
+    Args:
+        entry_id: The ID of the entry to invalidate
         
-        Args:
-            entry_id: The ID of the entry to invalidate
-            
-        Returns:
-            True if the entry was found and invalidated, False otherwise
-        """
-        if not ENABLE_RAG:
-            return False
+    Returns:
+        True if the entry was found and invalidated, False otherwise
+    """
+    if not ENABLE_RAG or not HAS_CHROMADB_RAG:
+        return False
         
-        try:
-            global _vector_db
-            # Load vector DB if not loaded
-            if not _vector_db:
-                _load_vector_db()
-            
-            # Find the entry by ID
-            for i, entry in enumerate(_vector_db):
-                if str(entry.get("id", "")) == entry_id:
-                    # Remove the entry
-                    _vector_db.pop(i)
-                    # Save the updated DB
-                    _save_vector_db()
-                    logger.info(f"Invalidated RAG entry with ID: {entry_id}")
-                    return True
-            
-            logger.warning(f"RAG entry with ID: {entry_id} not found")
-            return False
-        except Exception as e:
-            logger.error(f"Error invalidating RAG entry: {e}")
-            return False
+    try:
+        # Delete from ChromaDB collection
+        collection.delete(ids=[entry_id])
+        logger.info(f"Invalidated RAG entry: {entry_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error invalidating RAG entry: {e}")
+        return False
 
-# Use the imported invalidate_rag_entries_by_query if available, otherwise define a fallback
-if not HAS_CHROMADB_RAG:
-    async def invalidate_rag_entries_by_query(query: str, similarity_threshold: float = 0.9) -> int:
-        """Invalidate entries in the RAG cache that match the given query with high similarity.
+async def invalidate_rag_entries_by_query(query: str, similarity_threshold: float = 0.9) -> int:
+    """Invalidate entries in the RAG cache that match the given query with high similarity.
+    
+    Args:
+        query: The query to match against
+        similarity_threshold: Minimum similarity threshold (0-1)
         
-        Args:
-            query: The query to match against
-            similarity_threshold: Minimum similarity threshold (0-1)
-            
-        Returns:
-            Number of entries invalidated
-        """
-        if not ENABLE_RAG or not AZURE_OPENAI_API_KEY:
-            return 0
-        
-        try:
-            global _vector_db
-            # Load vector DB if not loaded
-            if not _vector_db:
-                _load_vector_db()
-            
-            if not _vector_db:
-                return 0
-            
-            # Get query embedding
-            query_embedding = await _get_embedding(query)
-            
-            # Find entries with high similarity
-            entries_to_remove = []
-            for i, entry in enumerate(_vector_db):
-                # Calculate similarity with query embedding
-                query_similarity = _cosine_similarity(query_embedding, entry.get("query_embedding", []))
-                if query_similarity >= similarity_threshold:
-                    entries_to_remove.append(i)
-            
-            # Remove entries in reverse order to avoid index issues
-            for i in sorted(entries_to_remove, reverse=True):
-                _vector_db.pop(i)
-            
-            # Save the updated DB if any entries were removed
-            if entries_to_remove:
-                _save_vector_db()
-                logger.info(f"Invalidated {len(entries_to_remove)} RAG entries matching query: '{query}'")
-            
-            return len(entries_to_remove)
-        except Exception as e:
-            logger.error(f"Error invalidating RAG entries by query: {e}")
-            return 0
-
-# Use the imported retrieve_from_rag_cache if available, otherwise define a fallback
+    Returns:
+        Number of entries invalidated
+    """
 if not HAS_CHROMADB_RAG:
     async def retrieve_from_rag_cache(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
-        """Retrieve relevant entries from the RAG cache.
+    """Retrieve relevant entries from the RAG cache using ChromaDB.
+    
+    Args:
+        query: The search query
+        max_results: Maximum number of results to retrieve
         
-        Args:
-            query: The search query
-            max_results: Maximum number of results to retrieve
-            
-        Returns:
-            List of relevant entries
-        """
-        if not ENABLE_RAG or not AZURE_OPENAI_API_KEY:
-            return []
+    Returns:
+        List of relevant entries
+    """
+    if not ENABLE_RAG or not HAS_CHROMADB_RAG:
+        return []
+    
+    try:
+        # Query ChromaDB collection
+        results = collection.query(
+            query_texts=[query],
+            n_results=max_results
+        )
         
-        try:
-            global _vector_db
-            # Load vector DB if not loaded
-            if not _vector_db:
-                _load_vector_db()
+        # Format results
+        entries = []
+        for i, (doc, metadata, distance) in enumerate(zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0]
+        )):
+            # Convert distance to similarity (ChromaDB uses cosine distance)
+            similarity = 1 - distance
             
-            if not _vector_db:
-                return []
+            entry = {
+                "id": results["ids"][0][i],
+                "query": metadata["query"],
+                "results": doc,
+                "timestamp": float(metadata["timestamp"]),
+                "similarity": similarity
+            }
+            entries.append(entry)
             
-            # Get query embedding
-            query_embedding = await _get_embedding(query)
+        logger.info(f"Retrieved {len(entries)} relevant entries from RAG cache for '{query}'")
+        return entries
+        
+    except Exception as e:
+        logger.error(f"Error retrieving from RAG cache: {e}")
+        return []
+
+async def retrieve_from_rag_cache(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
+    """Retrieve relevant entries from the RAG cache using ChromaDB.
+    
+    Args:
+        query: The search query
+        max_results: Maximum number of results to retrieve
+        
+    Returns:
+        List of relevant entries
+    """
+    if not ENABLE_RAG or not HAS_CHROMADB_RAG:
+        return []
+    
+    try:
+        # Query ChromaDB collection
+        results = collection.query(
+            query_texts=[query],
+            n_results=max_results
+        )
+        
+        # Format results
+        entries = []
+        for i, (doc, metadata, distance) in enumerate(zip(
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0]
+        )):
+            # Convert distance to similarity (ChromaDB uses cosine distance)
+            similarity = 1 - distance
             
-            # Calculate similarities
-            similarities = []
-            for i, entry in enumerate(_vector_db):
-                # Calculate similarity with query embedding
-                query_similarity = _cosine_similarity(query_embedding, entry.get("query_embedding", []))
-                # Calculate similarity with results embedding
-                results_similarity = _cosine_similarity(query_embedding, entry.get("results_embedding", []))
-                # Use the higher similarity
-                similarity = max(query_similarity, results_similarity)
-                similarities.append((i, similarity))
+            entry = {
+                "id": results["ids"][0][i],
+                "query": metadata["query"],
+                "results": doc,
+                "timestamp": float(metadata["timestamp"]),
+                "similarity": similarity
+            }
+            entries.append(entry)
             
-            # Sort by similarity (highest first)
-            similarities.sort(key=lambda x: x[1], reverse=True)
-            
-            # Filter by minimum similarity
-            similarities = [(i, sim) for i, sim in similarities if sim >= RAG_MIN_SIMILARITY]
-            
-            # Get top results
-            top_results = []
-            for i, similarity in similarities[:max_results]:
-                entry = _vector_db[i].copy()
-                entry["similarity"] = similarity
-                # Remove embeddings to save space
-                entry.pop("query_embedding", None)
-                entry.pop("results_embedding", None)
-                top_results.append(entry)
-            
-            logger.info(f"Retrieved {len(top_results)} relevant entries from RAG cache for '{query}'")
-            return top_results
-        except Exception as e:
-            logger.error(f"Error retrieving from RAG cache: {e}")
-            return []
+        logger.info(f"Retrieved {len(entries)} relevant entries from RAG cache for '{query}'")
+        return entries
+        
+    except Exception as e:
+        logger.error(f"Error retrieving from RAG cache: {e}")
+        return []
 
 async def reformulate_query(query: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> str:
     """Use Azure OpenAI to reformulate the search query for better results.
@@ -1670,18 +1628,42 @@ class DataManager:
         self.save_embedding_state()
     
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
-        """Get embedding for a text using Azure OpenAI."""
+        """Get embedding for a text using the cached local embedding model."""
+        try:
+            # Truncate text if too long (bge-small-en-v1.5 has a context length of 512 tokens)
+            if len(text) > 2000:
+                text = text[:2000]
+            
+            # Get the embedding model (loads from cache if available)
+            model = get_embedding_model()
+            if model is None:
+                # Try to fall back to Azure OpenAI if available
+                return self._get_azure_embedding(text)
+            
+            # Generate embedding using the local model
+            import asyncio
+            loop = asyncio.get_event_loop()
+            embedding = loop.run_until_complete(asyncio.to_thread(model.encode, text))
+            return np.array(embedding)
+            
+        except Exception as e:
+            logger.error(f"Error getting local embedding: {e}")
+            # Fall back to Azure OpenAI if available
+            return self._get_azure_embedding(text)
+    
+    def _get_azure_embedding(self, text: str) -> Optional[np.ndarray]:
+        """Fall back to Azure OpenAI for embeddings if local model fails."""
         if not self.embedding_client:
             return None
-            
+        
         try:
             response = self.embedding_client.embeddings.create(
                 input=text,
-                model=os.environ.get("AZURE_OPENAI_DEPLOYMENT", "model-router")
+                model=os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-ada-002")
             )
             return np.array(response.data[0].embedding)
         except Exception as e:
-            logger.error(f"Error getting embedding: {e}")
+            logger.error(f"Error getting Azure embedding: {e}")
             return None
     
     def _chunk_text(self, text: str, chunk_size: int = 4000) -> List[str]:

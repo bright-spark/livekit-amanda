@@ -53,7 +53,8 @@ load_dotenv()
 # Get configuration from environment variables
 ENABLE_CACHE = os.environ.get("BRAVE_SEARCH_ENABLE_CACHE", "true").lower() == "true"
 ENABLE_PERSISTENCE = os.environ.get("BRAVE_SEARCH_ENABLE_PERSISTENCE", "true").lower() == "true"
-AI_RATE_LIMIT = int(os.environ.get("BRAVE_AI_SEARCH_RATE_LIMIT", "1"))
+# Rate limit: 1 for free tier, 20 for paid tier
+AI_RATE_LIMIT = int(os.environ.get("BRAVE_AI_SEARCH_RATE_LIMIT", "1").split('#')[0].strip())
 
 # Configure logging
 logging.basicConfig(

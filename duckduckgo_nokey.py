@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 # Get configuration from environment variables
 ENABLE_CACHE = os.environ.get("DUCKDUCKGO_SEARCH_ENABLE_CACHE", "true").lower() == "true"
 ENABLE_PERSISTENCE = os.environ.get("DUCKDUCKGO_SEARCH_ENABLE_PERSISTENCE", "true").lower() == "true"
-RATE_LIMIT = float(os.environ.get("DUCKDUCKGO_SEARCH_RATE_LIMIT", "0.5"))  # Requests per second
+# Requests per second
+RATE_LIMIT = float(os.environ.get("DUCKDUCKGO_SEARCH_RATE_LIMIT", "0.5").split('#')[0].strip())
 DEFAULT_REGION = os.environ.get("DUCKDUCKGO_SEARCH_REGION", "wt-wt")
 DEFAULT_SAFESEARCH = os.environ.get("DUCKDUCKGO_SEARCH_SAFESEARCH", "moderate")
 USER_AGENT = os.environ.get("DUCKDUCKGO_SEARCH_USER_AGENT", 

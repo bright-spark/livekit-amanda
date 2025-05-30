@@ -119,8 +119,10 @@ logger = logging.getLogger(__name__)
 # Get configuration from environment variables
 ENABLE_CACHE = os.environ.get("BING_SEARCH_ENABLE_CACHE", "true").lower() == "true"
 ENABLE_PERSISTENCE = os.environ.get("BING_SEARCH_ENABLE_PERSISTENCE", "true").lower() == "true"
-RATE_LIMIT = float(os.environ.get("BING_SEARCH_RATE_LIMIT", "0.5"))  # Requests per second
-MAX_RETRIES = int(os.environ.get("BING_SEARCH_MAX_RETRIES", "3"))
+# Requests per second
+RATE_LIMIT = float(os.environ.get("BING_SEARCH_RATE_LIMIT", "0.5").split('#')[0].strip())
+# Maximum number of retries for Bing Search
+MAX_RETRIES = int(os.environ.get("BING_SEARCH_MAX_RETRIES", "3").split('#')[0].strip())
 
 # Simple in-memory cache
 _cache = {}

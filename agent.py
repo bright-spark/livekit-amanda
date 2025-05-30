@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from googlesearch.googlesearch import GoogleSearch
 
 # Local imports
+from message_validator import validate_message, validate_messages
 # Import Locanto module with Brave Search API integration
 try:
     # Try to import the optimized Brave Search Locanto implementation first
@@ -146,6 +147,35 @@ from livekit.agents import (
     function_tool,
 )
 from livekit.agents.llm import ChatChunk, ChatContext, ChatMessage
+
+# Monkey patch the ChatContext.add_message method to validate messages
+original_add_message = ChatContext.add_message
+
+def patched_add_message(self, *args, **kwargs):
+    """Patched version of add_message that ensures content is never None."""
+    # If called with positional args, convert them to kwargs
+    if args:
+        if len(args) >= 2:
+            kwargs['role'] = args[0]
+            kwargs['content'] = args[1]
+        elif len(args) == 1:
+            kwargs['role'] = args[0]
+    
+    # Ensure content is never None and is a list
+    if 'content' in kwargs:
+        if kwargs['content'] is None:
+            kwargs['content'] = [""]
+        elif isinstance(kwargs['content'], str):
+            kwargs['content'] = [kwargs['content']]
+        elif not isinstance(kwargs['content'], list):
+            kwargs['content'] = [str(kwargs['content'])]
+    else:
+        kwargs['content'] = [""]
+    
+    # Call the original method
+    return original_add_message(self, **kwargs)
+
+ChatContext.add_message = patched_add_message
 from livekit.plugins import azure, openai, silero
 
 # Local application imports
@@ -183,18 +213,23 @@ BROWSER_TOOL = {"gemini"}
 
 # Chunking parameters for voice responses
 CHUNK_ENABLE = os.environ.get("CHUNK_ENABLE", "true").lower() in ("true", "1", "yes")
-MAX_AUTO_CHUNKS = int(os.environ.get("MAX_AUTO_CHUNKS", 10))
-CHUNK_PAUSE = float(os.environ.get("CHUNK_PAUSE", 1.0))
+MAX_AUTO_CHUNKS = int(os.environ.get("MAX_AUTO_CHUNKS", "10").split('#')[0].strip())
+CHUNK_PAUSE = float(os.environ.get("CHUNK_PAUSE", "1.0").split('#')[0].strip())
 
 # LLM timeout and retry configuration
-LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", 60.0))  # Default 60 seconds
-LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", 3))  # Default 3 retries
-LLM_RETRY_DELAY = float(os.environ.get("LLM_RETRY_DELAY", 2.0))  # Default 2 seconds
-LLM_RETRY_BACKOFF = float(os.environ.get("LLM_RETRY_BACKOFF", 1.5))  # Default exponential backoff factor
+# Default timeout is 60 seconds
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "60.0").split('#')[0].strip())
+# Default 3 retries
+LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3").split('#')[0].strip())
+# Default 2 seconds
+LLM_RETRY_DELAY = float(os.environ.get("LLM_RETRY_DELAY", "2.0").split('#')[0].strip())
+# Default exponential backoff factor
+LLM_RETRY_BACKOFF = float(os.environ.get("LLM_RETRY_BACKOFF", "1.5").split('#')[0].strip())
 
 # Search result configuration
 SEARCH_RESULT_TRUNCATE = os.environ.get("SEARCH_RESULT_TRUNCATE", "true").lower() in ("true", "1", "yes")
-SEARCH_RESULT_MAX_CHARS = int(os.environ.get("SEARCH_RESULT_MAX_CHARS", 1000))  # Default 1000 characters per result
+# Default 1000 characters per result
+SEARCH_RESULT_MAX_CHARS = int(os.environ.get("SEARCH_RESULT_MAX_CHARS", "1000").split('#')[0].strip())
 
 # Debug output function for search results
 def debug_search_result(search_engine: str, query: str, results: any, cache_status: str = None, api_info: str = None) -> None:
@@ -238,6 +273,32 @@ def debug_search_result(search_engine: str, query: str, results: any, cache_stat
     print(separator)
     # Force flush stdout to ensure output is displayed immediately
     sys.stdout.flush()
+
+# Patch OpenAI LLM class to validate messages before sending to API
+def patch_openai_llm():
+    """Patch the OpenAI LLM class to validate messages before sending to API."""
+    try:
+        from livekit.plugins.openai.llm import LLM
+        original_run = LLM._run
+        
+        async def patched_run(self):
+            """Patched version of _run that validates messages before sending to API."""
+            # Validate messages in the chat context
+            if hasattr(self, "_chat_context") and self._chat_context is not None:
+                for i, msg in enumerate(self._chat_context.messages):
+                    if 'content' not in msg or msg['content'] is None:
+                        self._chat_context.messages[i]['content'] = ""
+                        logging.debug(f"Fixed missing content in OpenAI LLM message with role: {msg.get('role', 'unknown')}")
+            
+            return await original_run(self)
+        
+        LLM._run = patched_run
+        logging.info("Successfully patched OpenAI LLM class to validate messages")
+    except Exception as e:
+        logging.warning(f"Failed to patch OpenAI LLM class: {e}")
+
+# Apply the patch
+patch_openai_llm()
 
 # Log configuration parameters
 logging.info(f"Voice response chunking configured with CHUNK_ENABLE={CHUNK_ENABLE}, MAX_AUTO_CHUNKS={MAX_AUTO_CHUNKS}, CHUNK_PAUSE={CHUNK_PAUSE}s")
@@ -346,7 +407,7 @@ class FunctionAgent(Agent):
         
         super().__init__(
             instructions=f"""
-                You are Amanda, an advanced AI assistant with access to a comprehensive set of tools and capabilities.
+                You are Amanda, Martin's advanced AI assistant with access to a comprehensive set of tools and capabilities.
                 Your primary goal is to be helpful, informative, and efficient in your responses.
                 
                 ---
@@ -357,10 +418,10 @@ class FunctionAgent(Agent):
                 - ALWAYS teach in individual steps waiting for user input after each step.
                 - ALWAYS list in in individual steps waiting for user input after each step.
                 - ALWAYS explain lists in individual waiting for user input after each step.
-                - ALWAYS try and respond to what the user said if you understand
-                - ALWAYS ask for the user to explain if you do not understand
-                - ALWAYS be friendly but not overly enthusiastic
-                - ALWAYS be brief and natural
+                - ALWAYS try and respond to what the user said if you understand.
+                - ALWAYS ask for the user to explain if you do not understand.
+                - ALWAYS be friendly but not overly enthusiastic.
+                - ALWAYS be brief and natural.
                 - ALWAYS keep normal responses to 1 sentence or less.
                 - ALWAYS keep normal explanations to 3 sentences or less.
                 - ALWAYS generate random interesting stories when asked to tell a story.
@@ -368,16 +429,16 @@ class FunctionAgent(Agent):
                 - ALWAYS say no if the user asks if you can't hear them.
                 - ALWAYS say yes if the user asks if you can hear them say yes.
                 - ALWAYS say no if the user asks if you can't hear them say yes.
-                - DO NOT ask too many questions have a normal conversation
-                - DO NOT refer to a chat as type or typed say speak
-                - DO NOT refer to a chat as text say talk
-                - DO NOT repeat yourself
-                - DO NOT ask questions unless directly relevant to something the user said
-                - DO NOT pretend to be the user
-                - DO NOT generate questions or prompts on behalf of the user
-                - DO NOT ask the user to do something they should not do legally
-                - DO NOT ask the user to do something they should not do safely
-                - NEVER use emojis.
+                - DO NOT ask too many questions have a normal conversation.
+                - DO NOT refer to a chat as type or typed say speak.
+                - DO NOT refer to a chat as text say talk.
+                - DO NOT repeat yourself.
+                - DO NOT ask questions unless directly relevant to something the user said.
+                - DO NOT pretend to be the user.
+                - DO NOT generate questions or prompts on behalf of the user.
+                - DO NOT ask the user to do something they should not do legally.
+                - DO NOT ask the user to do something they should not do safely.
+                - NEVER use emojis or any other special characters.
                 - NEVER create lists unless absolutely necessary.
                 - NEVER use lists, bullet points, or robotic formatting.
                 - NEVER sound robotic or overly formal.
@@ -525,7 +586,7 @@ try:
     
     BRAVE_SEARCH_ENABLE_CACHE = os.environ.get("BRAVE_SEARCH_ENABLE_CACHE", "true").lower() == "true"
     BRAVE_SEARCH_ENABLE_PERSISTENCE = os.environ.get("BRAVE_SEARCH_ENABLE_PERSISTENCE", "true").lower() == "true"
-    BRAVE_SEARCH_RATE_LIMIT = int(os.environ.get("BRAVE_SEARCH_RATE_LIMIT", "1"))
+    BRAVE_SEARCH_RATE_LIMIT = int(os.environ.get("BRAVE_SEARCH_RATE_LIMIT", "1").split('#')[0].strip())
     
     HAS_BRAVE_SEARCH = True
     logging.info(f"Using configurable Brave Search API implementation with settings: cache={BRAVE_SEARCH_ENABLE_CACHE}, persistence={BRAVE_SEARCH_ENABLE_PERSISTENCE}, rate_limit={BRAVE_SEARCH_RATE_LIMIT}")
@@ -611,9 +672,9 @@ class AIVoiceAssistant:
         """Initialize Voice Activity Detection with all relevant parameters from env vars"""
         if self.vad is None:
             import os
-            threshold = float(os.environ.get("VAD_THRESHOLD", 0.5))
-            min_speech = float(os.environ.get("VAD_MIN_SPEECH", 0.1))
-            min_silence = float(os.environ.get("VAD_MIN_SILENCE", 0.5))
+            threshold = float(os.environ.get("VAD_THRESHOLD", "0.5").split('#')[0].strip())
+            min_speech = float(os.environ.get("VAD_MIN_SPEECH", "0.1").split('#')[0].strip())
+            min_silence = float(os.environ.get("VAD_MIN_SILENCE", "0.5").split('#')[0].strip())
             debug = os.environ.get("VAD_DEBUG", "false").lower() in ("1", "true", "yes", "on")
             try:
                 proc.userdata["vad"] = silero.VAD.load(
